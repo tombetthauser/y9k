@@ -7,7 +7,7 @@ const stage = document.getElementById("stage");
 stage.appendChild(canvas);
 
 // Audio levels (0 = silent, 1 = full)
-const MUSIC_VOLUME = 0.45;
+const MUSIC_VOLUME = 0.25;
 const LIGHTBOX_SFX_VOLUME = 1;
 
 const lightbox = setupLightbox({ sfxVolume: LIGHTBOX_SFX_VOLUME });
