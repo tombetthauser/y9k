@@ -38,7 +38,7 @@ const DRAG_THRESHOLDER = 4;
 const clickableArt = [];
 
 // const MUSIC_PATH =  "music/wind.mp3";
-const MUSIC_PATH =  "music/birds.wav";
+const MUSIC_PATH =  "music/birds.mp3";
 const musicToggle = document.getElementById("music-toggle");
 let musicAudio = null;
 

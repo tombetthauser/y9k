@@ -9,7 +9,7 @@
  */
 export function setupLightbox({
     root = document.getElementById("lightbox"),
-    sfxPath = "music/page-1.wav",
+    sfxPath = "music/page-1.mp3",
     sfxVolume = 0.5,
 } = {}) {
     if (!root) throw new Error("setupLightbox: #lightbox not found");
