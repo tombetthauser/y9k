@@ -9,8 +9,28 @@ stage.appendChild(canvas);
 // Audio levels (0 = silent, 1 = full)
 const MUSIC_VOLUME = 0.25;
 const LIGHTBOX_SFX_VOLUME = 1;
+const DOOR_SFX_VOLUME = 1;
+const DOOR_LOCKED_SOUND = "music/door-locked.mp3";
+const DOOR_UNLOCKED_SOUND = "music/door-squeek-complete.mp3";
+const SOUND_PREF_KEY = "y9k-sound-on";
 
-let IS_SOUND_ON = true;
+const readSoundPref = () => {
+    try {
+        const v = localStorage.getItem(SOUND_PREF_KEY);
+        if (v === null) return false;
+        return v === "1" || v === "true";
+    } catch {
+        return false;
+    }
+};
+
+const writeSoundPref = (on) => {
+    try {
+        localStorage.setItem(SOUND_PREF_KEY, on ? "1" : "0");
+    } catch (_) {}
+};
+
+let IS_SOUND_ON = readSoundPref();
 
 const lightbox = setupLightbox({ sfxVolume: LIGHTBOX_SFX_VOLUME });
 
@@ -55,29 +75,56 @@ const ensureMusicAudio = () => {
 }
 
 const syncMusicToggleUi = () => {
-    const on = musicAudio != null && !musicAudio.paused;
-    IS_SOUND_ON = on;
-    musicToggle.textContent = on ? "🔊" : "🔇";
-    musicToggle.title = on ? "mute sound" : "play sound";
-    musicToggle.setAttribute("aria-label", on ? "mute sound" : "play music");
-}
+    musicToggle.textContent = IS_SOUND_ON ? "🔊" : "🔇";
+    musicToggle.title = IS_SOUND_ON ? "mute sound" : "play sound";
+    musicToggle.setAttribute("aria-label", IS_SOUND_ON ? "mute sound" : "play music");
+};
 
 const toggleMusic = async () => {
     const a = ensureMusicAudio();
     try {
-        if (a.paused) await a.play();
-        else a.pause();
+        if (IS_SOUND_ON) {
+            a.pause();
+            IS_SOUND_ON = false;
+        } else {
+            await a.play();
+            IS_SOUND_ON = true;
+        }
     } catch (err) {
         console.warn("sound play blocked or failed", err);
     }
+    writeSoundPref(IS_SOUND_ON);
     syncMusicToggleUi();
-}
+};
 
 musicToggle.addEventListener("click", e => {
     e.stopPropagation();
     toggleMusic();
 });
-syncMusicToggleUi();
+
+const restoreSound = async () => {
+    syncMusicToggleUi();
+    if (!IS_SOUND_ON) return;
+    try {
+        await ensureMusicAudio().play();
+    } catch (_) {
+        // Autoplay may be blocked until a user gesture; preference stays on for SFX.
+    }
+    syncMusicToggleUi();
+};
+restoreSound();
+
+const playDoorSound = (soundPath) => {
+    if (!IS_SOUND_ON) return Promise.resolve();
+    return new Promise(resolve => {
+        const a = new Audio(soundPath);
+        a.volume = DOOR_SFX_VOLUME;
+        const done = () => resolve();
+        a.addEventListener("ended", done, { once: true });
+        a.addEventListener("error", done, { once: true });
+        a.play().catch(done);
+    });
+};
 
 
 // ########################################
@@ -144,7 +191,19 @@ const endDrag = e => {
     const hits = raycaster.intersectObjects(clickableArt);
 
     if (hits.length > 0) {
-        lightbox.open(hits[0].object.userData.imageFile, IS_SOUND_ON);
+        const hit = hits[0].object;
+        if (hit.userData.isDoor) {
+            if (hit.userData.locked) {
+                playDoorSound(DOOR_LOCKED_SOUND);
+                return;
+            }
+            const href = hit.userData.href;
+            playDoorSound(DOOR_UNLOCKED_SOUND).then(() => {
+                if (href) window.location.href = href;
+            });
+            return;
+        }
+        lightbox.open(hit.userData.imageFile, IS_SOUND_ON);
     }
 };
 
@@ -417,6 +476,30 @@ const ROOM_HALF_Y = ROOM_HEIGHT / 2;
 const ROOM_HALF_Z = ROOM_DEPTH / 2;
 const WALL_INSET = 0.05;
 
+const placeOnWall = (mesh, wall, x, y, halfW) => {
+    const maxX = wall === "north" || wall === "south"
+        ? ROOM_HALF_X - halfW
+        : ROOM_HALF_Z - halfW;
+    const lx = Math.max(-maxX, Math.min(maxX, x));
+
+    if (wall === "north") {
+        mesh.position.set(lx, y, -(ROOM_HALF_Z - WALL_INSET));
+    } else if (wall === "south") {
+        mesh.position.set(lx, y, ROOM_HALF_Z - WALL_INSET);
+        mesh.rotation.y = Math.PI;
+    } else if (wall === "west") {
+        mesh.position.set(-(ROOM_HALF_X - WALL_INSET), y, lx);
+        mesh.rotation.y = Math.PI / 2;
+    } else if (wall === "east") {
+        mesh.position.set(ROOM_HALF_X - WALL_INSET, y, lx);
+        mesh.rotation.y = -Math.PI / 2;
+    } else {
+        console.warn("Invalid wall: ", wall);
+        return false;
+    }
+    return true;
+};
+
 const addWallImage = (wall, x, y, imageFile, imageWidth) => {
     textureLoader.load(imageFile, tex => {
         tex.colorSpace = THREE.SRGBColorSpace;
@@ -431,38 +514,54 @@ const addWallImage = (wall, x, y, imageFile, imageWidth) => {
             new THREE.MeshStandardMaterial({ map: tex })
         );
 
-        const maxX = wall === "north" || wall === "south"
-            ? ROOM_HALF_X - imageWidth / 2
-            : ROOM_HALF_Z - imageWidth / 2;
         const maxY = ROOM_HALF_Y - imageHeight / 2;
-        const lx = Math.max(-maxX, Math.min(maxX, x));
         const ly = Math.max(-maxY, Math.min(maxY, y));
 
-        if (wall === "north") {
-            art.position.set(lx, ly, -(ROOM_HALF_Z - WALL_INSET));
-        } else if (wall === "south") {
-            art.position.set(lx, ly, ROOM_HALF_Z - WALL_INSET);
-            art.rotation.y = Math.PI;
-        } else if (wall === "west") {
-            art.position.set(-(ROOM_HALF_X - WALL_INSET), ly, lx);
-            art.rotation.y = Math.PI / 2;
-        } else if (wall === "east") {
-            art.position.set(ROOM_HALF_X - WALL_INSET, ly, lx);
-            art.rotation.y = -Math.PI / 2;
-        } else {
-            console.warn("Invalid wall: ", wall);
-            return;
-        }
+        if (!placeOnWall(art, wall, x, ly, imageWidth / 2)) return;
 
         art.userData.imageFile = imageFile;
         clickableArt.push(art);
         scene.add(art);
     });
-}
+};
+
+// Door-sized wall image, bottom flush with the floor.
+const addWallDoor = (wall, x, imageFile, doorHeight, {
+    locked = true,
+    href = null,
+} = {}) => {
+    textureLoader.load(imageFile, tex => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.magFilter = THREE.NearestFilter;
+        tex.minFilter = THREE.NearestFilter;
+
+        const aspect = tex.image.width / tex.image.height;
+        const imageWidth = doorHeight * aspect;
+        const imageHeight = Math.min(doorHeight, ROOM_HEIGHT);
+
+        const door = new THREE.Mesh(
+            new THREE.PlaneGeometry(imageWidth, imageHeight),
+            new THREE.MeshStandardMaterial({ map: tex })
+        );
+
+        // Sit on the floor: bottom edge at -ROOM_HALF_Y
+        const ly = -ROOM_HALF_Y + imageHeight / 2;
+
+        if (!placeOnWall(door, wall, x, ly, imageWidth / 2)) return;
+
+        door.userData.isDoor = true;
+        door.userData.locked = locked;
+        door.userData.href = href;
+        clickableArt.push(door);
+        scene.add(door);
+    });
+};
 
 const SIZE_NORMAL = 0.9;
 const SIZE_AMAR = 1.55;
 const SIZE_TALL = 2.5;
+const DOOR_HEIGHT = 5;
+const DOOR_CORNER_GAP = 0.85;
 
 addWallImage("south", 0, 0, "images/surface.jpg", 1);
 addWallImage("south", 1.5, 0, "images/futuremen.jpg", 0.8);
@@ -470,6 +569,17 @@ addWallImage("south", -1.5, 0, "images/jupiter.jpg", SIZE_NORMAL);
 addWallImage("south", -3.1, 0, "images/bstar.jpg", SIZE_NORMAL);
 addWallImage("south", 3.1, 0, "images/packers.jpg", SIZE_NORMAL);
 addWallImage("south", -4.5, 0, "images/bruegel.jpg", SIZE_NORMAL);
+
+// Left side of south wall (viewed from inside), inset from the corner.
+{
+    const doorAspect = 264 / 676;
+    const doorWidth = DOOR_HEIGHT * doorAspect;
+    const doorX = ROOM_HALF_X - doorWidth / 2 - DOOR_CORNER_GAP;
+    addWallDoor("south", doorX, "images/door-1.jpg", DOOR_HEIGHT, {
+        locked: false,
+        href: "./1.html",
+    });
+}
 
 addWallImage("north", -0.95, 0, "images/amar1.jpg", SIZE_AMAR);
 addWallImage("north", 0.95, 0, "images/amar2.jpg", SIZE_AMAR);
