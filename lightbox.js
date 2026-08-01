@@ -23,13 +23,49 @@ export function setupLightbox({
         throw new Error("setupLightbox: expected img, #lightbox-caption, .lightbox-stage");
     }
 
-    const openCloseSfx = new Audio(sfxPath);
-    openCloseSfx.volume = Math.max(0, Math.min(1, sfxVolume));
-    const playOpenCloseSfx = () => {
+    const sfxGain = Math.max(0, Math.min(1, sfxVolume));
+    let audioCtx = null;
+    let sfxBuffer = null;
+
+    const ensureAudioCtx = () => {
+        if (!audioCtx) {
+            const Ctx = window.AudioContext || window.webkitAudioContext;
+            if (!Ctx) return null;
+            audioCtx = new Ctx();
+        }
+        if (audioCtx.state === "suspended") {
+            audioCtx.resume().catch(() => {});
+        }
+        return audioCtx;
+    };
+
+    // Decode once and keep in memory so open/close has no fetch/decode delay.
+    (async () => {
         try {
-            openCloseSfx.currentTime = 0;
-            openCloseSfx.play().catch(() => {});
+            const res = await fetch(sfxPath);
+            const data = await res.arrayBuffer();
+            const ctx = ensureAudioCtx();
+            if (!ctx) return;
+            sfxBuffer = await ctx.decodeAudioData(data.slice(0));
         } catch (_) {}
+    })();
+
+    const playOpenCloseSfx = () => {
+        const ctx = ensureAudioCtx();
+        if (!ctx || !sfxBuffer) return;
+        const start = () => {
+            try {
+                const src = ctx.createBufferSource();
+                const gain = ctx.createGain();
+                src.buffer = sfxBuffer;
+                gain.gain.value = sfxGain;
+                src.connect(gain);
+                gain.connect(ctx.destination);
+                src.start(0);
+            } catch (_) {}
+        };
+        if (ctx.state === "running") start();
+        else ctx.resume().then(start).catch(() => {});
     };
 
     let scale = 1;
