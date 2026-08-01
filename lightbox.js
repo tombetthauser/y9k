@@ -9,10 +9,12 @@
  */
 export function setupLightbox({
     root = document.getElementById("lightbox"),
-    sfxPath = "music/page-1.mp3",
+    sfxPath = "music/page-3.mp3",
     sfxVolume = 0.5,
 } = {}) {
     if (!root) throw new Error("setupLightbox: #lightbox not found");
+
+    let IS_SOUND_ON = false;
 
     const img = root.querySelector("img");
     const caption = root.querySelector("#lightbox-caption");
@@ -156,8 +158,9 @@ export function setupLightbox({
         try { stage.setPointerCapture(e.pointerId); } catch (_) {}
     };
 
-    function open(imageFile) {
+    function open(imageFile, isSoundOn = false) {
         resetZoom();
+        IS_SOUND_ON = isSoundOn;
         img.onload = () => {
             requestAnimationFrame(() => {
                 measureFit();
@@ -170,10 +173,12 @@ export function setupLightbox({
         caption.textContent = imageFile.split("/").pop();
         root.classList.add("is-open");
         root.setAttribute("aria-hidden", "false");
-        playOpenCloseSfx();
+        if (isSoundOn) {
+            playOpenCloseSfx();
+        }
     }
 
-    function close() {
+    function close(isSoundOn = false) {
         if (!isOpen()) return;
         root.classList.remove("is-open");
         root.setAttribute("aria-hidden", "true");
@@ -182,7 +187,9 @@ export function setupLightbox({
         caption.removeAttribute("href");
         caption.textContent = "";
         resetZoom();
-        playOpenCloseSfx();
+        if (isSoundOn) {
+            playOpenCloseSfx();
+        }
     }
 
     function isOpen() {
@@ -207,7 +214,7 @@ export function setupLightbox({
             didPan = false;
             return;
         }
-        close();
+        close(IS_SOUND_ON);
     });
     caption.addEventListener("click", e => e.stopPropagation());
     stage.addEventListener("click", e => e.stopPropagation());

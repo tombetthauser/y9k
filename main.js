@@ -10,6 +10,8 @@ stage.appendChild(canvas);
 const MUSIC_VOLUME = 0.25;
 const LIGHTBOX_SFX_VOLUME = 1;
 
+let IS_SOUND_ON = true;
+
 const lightbox = setupLightbox({ sfxVolume: LIGHTBOX_SFX_VOLUME });
 
 const AUTO_SPIN = 0.00035;
@@ -54,6 +56,7 @@ const ensureMusicAudio = () => {
 
 const syncMusicToggleUi = () => {
     const on = musicAudio != null && !musicAudio.paused;
+    IS_SOUND_ON = on;
     musicToggle.textContent = on ? "🔊" : "🔇";
     musicToggle.title = on ? "mute sound" : "play sound";
     musicToggle.setAttribute("aria-label", on ? "mute sound" : "play music");
@@ -141,7 +144,7 @@ const endDrag = e => {
     const hits = raycaster.intersectObjects(clickableArt);
 
     if (hits.length > 0) {
-        lightbox.open(hits[0].object.userData.imageFile);
+        lightbox.open(hits[0].object.userData.imageFile, IS_SOUND_ON);
     }
 };
 
