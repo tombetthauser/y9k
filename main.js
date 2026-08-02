@@ -1,5 +1,7 @@
 import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
 import { setupLightbox } from "./lightbox.js";
+import { createCheckAndActivateAudio, runOnFirstPointerDown } from "./audio-activate.js";
+import { addHallMolding } from "./molding.js";
 
 const canvas = document.createElement("canvas");
 
@@ -10,8 +12,8 @@ stage.appendChild(canvas);
 const MUSIC_VOLUME = 0.25;
 const LIGHTBOX_SFX_VOLUME = 1;
 const DOOR_SFX_VOLUME = 1;
-const DOOR_LOCKED_SOUND = "music/door-locked.mp3";
-const DOOR_UNLOCKED_SOUND = "music/door-squeek-complete.mp3";
+const DOOR_LOCKED_SOUND = "music/door-soft-complete.mp3";
+const DOOR_UNLOCKED_SOUND = "music/door-soft-complete.mp3";
 const SOUND_PREF_KEY = "y9k-sound-on";
 
 const readSoundPref = () => {
@@ -113,6 +115,9 @@ const restoreSound = async () => {
     syncMusicToggleUi();
 };
 restoreSound();
+
+const checkAndActivateAudio = createCheckAndActivateAudio({ ensureMusicAudio });
+runOnFirstPointerDown(checkAndActivateAudio);
 
 const playDoorSound = (soundPath) => {
     if (!IS_SOUND_ON) return Promise.resolve();
@@ -385,6 +390,18 @@ const addVerticalCornerLines = (width, height, depth, yOffset = 0, color=0xd2d2d
 };
 
 addVerticalCornerLines(ROOM_WIDTH, ROOM_HEIGHT, ROOM_DEPTH);
+
+{
+    const hw = ROOM_WIDTH / 2;
+    const hd = ROOM_DEPTH / 2;
+    // Gallery walls are 0xffffff — molding matches almost exactly.
+    addHallMolding(
+        scene,
+        [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]],
+        ROOM_HEIGHT,
+        0xf7f7f7
+    );
+}
 
 // ########################################
 

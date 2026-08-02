@@ -1,4 +1,13 @@
 import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+import { createAddElectricalBox } from "./electrical-box.js";
+import { createAddExitSign } from "./exit-sign.js";
+import { createAddFoldingChairs } from "./folding-chairs.js";
+import { createCheckAndActivateAudio, runOnFirstPointerDown } from "./audio-activate.js";
+import { createAddVent, ventPositionsAlongWall } from "./vent.js";
+import { createAddLightFixture, lightPositionsAlong } from "./light-fixture.js";
+import { createAddBoxStack } from "./box-stack.js";
+import { createAddLightSwitch } from "./light-switch.js";
+import { addHallMolding } from "./molding.js";
 
 const canvas = document.createElement("canvas");
 const stage = document.getElementById("stage");
@@ -6,8 +15,8 @@ stage.appendChild(canvas);
 
 const MUSIC_VOLUME = 0.25;
 const DOOR_SFX_VOLUME = 1;
-const DOOR_LOCKED_SOUND = "music/door-locked.mp3";
-const DOOR_UNLOCKED_SOUND = "music/door-squeek-complete.mp3";
+const DOOR_LOCKED_SOUND = "music/door-soft-complete.mp3";
+const DOOR_UNLOCKED_SOUND = "music/door-soft-complete.mp3";
 const SOUND_PREF_KEY = "y9k-sound-on";
 
 const readSoundPref = () => {
@@ -50,7 +59,7 @@ const pointer = new THREE.Vector2();
 const DRAG_THRESHOLDER = 4;
 const clickableDoors = [];
 
-const MUSIC_PATH = "music/wind-indoors-1.mp3";
+const MUSIC_PATH = "music/wind-indoors-1-muffled.mp3";
 const musicToggle = document.getElementById("music-toggle");
 let musicAudio = null;
 
@@ -103,6 +112,9 @@ const restoreSound = async () => {
     syncMusicToggleUi();
 };
 restoreSound();
+
+const checkAndActivateAudio = createCheckAndActivateAudio({ ensureMusicAudio });
+runOnFirstPointerDown(checkAndActivateAudio);
 
 const playDoorSound = (soundPath) => {
     if (!IS_SOUND_ON) return Promise.resolve();
@@ -159,14 +171,19 @@ const endDrag = e => {
     pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
     const hits = raycaster.intersectObjects(clickableDoors);
+    if (!hits.length) return;
 
-    if (hits.length > 0 && hits[0].object.userData.isDoor) {
-        const door = hits[0].object;
-        if (door.userData.locked) {
+    const obj = hits[0].object;
+    if (obj.userData.isLightSwitch) {
+        playDoorSound(DOOR_LOCKED_SOUND);
+        return;
+    }
+    if (obj.userData.isDoor) {
+        if (obj.userData.locked) {
             playDoorSound(DOOR_LOCKED_SOUND);
             return;
         }
-        const href = door.userData.href;
+        const href = obj.userData.href;
         playDoorSound(DOOR_UNLOCKED_SOUND).then(() => {
             if (href) window.location.href = href;
         });
@@ -324,12 +341,13 @@ const addVerticalCornerLines = (corners, height, color = 0x111111) => {
 };
 
 addVerticalCornerLines(PLUS_OUTLINE, ROOM_HEIGHT, 0x111111);
+addHallMolding(scene, PLUS_OUTLINE, ROOM_HEIGHT);
 
 const addWallDoor = (wall, imageFile, doorHeight, {
     bright = false,
     locked = true,
     href = null,
-} = {}) => {
+} = {}) => new Promise(resolve => {
     textureLoader.load(imageFile, tex => {
         tex.colorSpace = THREE.SRGBColorSpace;
         tex.magFilter = THREE.NearestFilter;
@@ -370,16 +388,19 @@ const addWallDoor = (wall, imageFile, doorHeight, {
             door.rotation.y = -Math.PI / 2;
         } else {
             console.warn("Invalid wall: ", wall);
+            resolve(null);
             return;
         }
 
         door.userData.isDoor = true;
+        door.userData.wall = wall;
         door.userData.locked = locked;
         door.userData.href = href;
         clickableDoors.push(door);
         scene.add(door);
+        resolve(door);
     });
-};
+});
 
 const DOOR_HEIGHT = 3.2;
 
@@ -389,11 +410,39 @@ const DOOR_HEIGHT = 3.2;
 //   [3]--[1]--[4]
 //              |
 //           [2]
+const addElectricalBox = createAddElectricalBox({ scene, textureLoader, roomHalfY: ROOM_HALF_Y });
+const addExitSign = createAddExitSign({ scene, textureLoader, roomHalfY: ROOM_HALF_Y });
+const addFoldingChairs = createAddFoldingChairs({ scene, textureLoader, roomHalfY: ROOM_HALF_Y });
+const ARM_SIDE = hl - hw;
+const hallWalls = {
+    // Arm side walls only — end walls have doors; north-arm east has the electrical box.
+    west: { x: -(hw - WALL_INSET), leftZ: hw, rightZ: hl },       // north-arm west
+    east: { x: hw - WALL_INSET, leftZ: -hw, rightZ: -hl },         // south-arm east
+    north: { z: -(hw - WALL_INSET), leftX: hw, rightX: hl },       // east-arm south side
+    south: { z: hw - WALL_INSET, leftX: -hw, rightX: -hl },        // west-arm north side
+};
+const addVent = createAddVent({
+    scene,
+    textureLoader,
+    roomHalfY: ROOM_HALF_Y,
+    walls: hallWalls,
+});
+const addLightFixture = createAddLightFixture({ scene, textureLoader, roomHalfY: ROOM_HALF_Y });
+const addBoxStack = createAddBoxStack({ scene, textureLoader, roomHalfY: ROOM_HALF_Y });
+const addLightSwitch = createAddLightSwitch({
+    scene,
+    textureLoader,
+    roomHalfY: ROOM_HALF_Y,
+    doorHeight: DOOR_HEIGHT,
+    clickable: clickableDoors,
+});
+const ELECTRICAL_IMG = "images/static_images/electrical.jpg";
+
 addWallDoor("north", "images/door-3.jpg", DOOR_HEIGHT, {
     bright: true,
     locked: false,
     href: "./index.html",
-});
+}).then(door => { if (door) addExitSign(door); });
 addWallDoor("south", "images/door-1.jpg", DOOR_HEIGHT, {
     locked: false,
     href: "./2.html",
@@ -406,6 +455,53 @@ addWallDoor("east", "images/door-1.jpg", DOOR_HEIGHT, {
     locked: false,
     href: "./4.html",
 });
+
+addElectricalBox("east", hw - WALL_INSET, (hw + hl) * 0.55, ELECTRICAL_IMG);
+{
+    const sw = 0.58; // center-to-center spacing in a set
+    // Beside the north door only.
+    addLightSwitch("north", 0.9, -(hl - WALL_INSET));
+    // Set of 2 on the empty north-arm west wall.
+    {
+        const wx = -(hw - WALL_INSET);
+        const z0 = hw + 1.05;
+        addLightSwitch("west", wx, z0);
+        addLightSwitch("west", wx, z0 + sw);
+    }
+}
+{
+    const cx = -(hw - WALL_INSET);
+    const cz = -(hw + hl) * 0.5;
+    const gap = 0.85;
+    addFoldingChairs(cx, cz - gap, "west", 3);
+    addFoldingChairs(cx, cz, "west", 2);
+    addFoldingChairs(cx, cz + gap, "west", 1);
+}
+{
+    for (const x of ventPositionsAlongWall(ARM_SIDE, 1)) addVent("west", x);
+    for (const x of ventPositionsAlongWall(ARM_SIDE, 1)) addVent("east", x);
+    for (const x of ventPositionsAlongWall(ARM_SIDE, 1)) addVent("north", x);
+    for (const x of ventPositionsAlongWall(ARM_SIDE, 1)) addVent("south", x);
+}
+{
+    // One fixture centered in each arm, long axis along the corridor.
+    for (const t of lightPositionsAlong(ARM_SIDE, 1)) {
+        addLightFixture(0, hw + t, Math.PI / 2);   // north arm
+        addLightFixture(0, -hw - t, Math.PI / 2);  // south arm
+        addLightFixture(hw + t, 0, 0);             // east arm
+        addLightFixture(-hw - t, 0, 0);            // west arm
+    }
+}
+{
+    // East-arm north wall (away from doors / chairs / electrical on north-arm east).
+    const z = hw - WALL_INSET;
+    const base = hw + 1.05;
+    addBoxStack(base, z, "south", 3);
+    addBoxStack(base + 1.2, z, "south", 2);
+    addBoxStack(base + 1.2 + 1.45, z, "south", 3);
+    // Single stack on west-arm south wall.
+    addBoxStack(-(hw + 1.6), -(hw - WALL_INSET), "north", 2);
+}
 
 scene.add(new THREE.AmbientLight(0xffffff, AMBIENT_LIGHT_LEVEL));
 const light = new THREE.DirectionalLight(0xffffff, DIRECTIONAL_LIGHT_LEVEL);
