@@ -7,6 +7,8 @@ import { createAddLightFixture, lightPositionsAlong } from "./light-fixture.js";
 import { createAddBoxStack } from "./box-stack.js";
 import { createAddLightSwitch } from "./light-switch.js";
 import { addHallMolding } from "./molding.js";
+import { initDevMode } from "./dev-mode.js";
+import { createWallClickHelper } from "./wall-click.js";
 
 const canvas = document.createElement("canvas");
 const stage = document.getElementById("stage");
@@ -213,6 +215,8 @@ window.addEventListener("orientationchange", () => setTimeout(syncViewportSize, 
 stage.addEventListener("fullscreenchange", syncViewportSize);
 stage.addEventListener("webkitfullscreenchange", syncViewportSize);
 
+initDevMode({ stage });
+
 const toggleWindowed = () => {
     document.body.classList.toggle("is-windowed");
     syncViewportSize();
@@ -282,34 +286,8 @@ ceiling.rotation.x = Math.PI / 2;
 ceiling.position.y = ROOM_HALF_Y;
 scene.add(ceiling);
 
-const addWallSegment = (x1, z1, x2, z2) => {
-    const dx = x2 - x1;
-    const dz = z2 - z1;
-    const len = Math.hypot(dx, dz);
-    if (len < 1e-6) return;
-
-    const cx = (x1 + x2) / 2;
-    const cz = (z1 + z2) / 2;
-
-    const edgeDir = new THREE.Vector3(dx, 0, dz).normalize();
-    const normal = new THREE.Vector3().crossVectors(edgeDir, new THREE.Vector3(0, 1, 0));
-    const toCenter = new THREE.Vector3(-cx, 0, -cz);
-    if (normal.dot(toCenter) < 0) normal.negate();
-
-    const wall = new THREE.Mesh(
-        new THREE.PlaneGeometry(len, ROOM_HEIGHT),
-        wallMat
-    );
-    wall.position.set(cx, 0, cz);
-    wall.rotation.y = Math.atan2(normal.x, normal.z);
-    scene.add(wall);
-};
-
-for (let i = 0; i < HALL_OUTLINE.length; i++) {
-    const [x1, z1] = HALL_OUTLINE[i];
-    const [x2, z2] = HALL_OUTLINE[(i + 1) % HALL_OUTLINE.length];
-    addWallSegment(x1, z1, x2, z2);
-}
+const wallClick = createWallClickHelper({ canvas, camera, stage, scene });
+wallClick.addWallsFromOutline(HALL_OUTLINE, { material: wallMat, height: ROOM_HEIGHT });
 
 const addVerticalCornerLines = (corners, height, color = 0x111111) => {
     const hy = height / 2;

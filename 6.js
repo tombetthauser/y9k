@@ -2,6 +2,8 @@ import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
 import { setupLightbox } from "./lightbox.js";
 import { createCheckAndActivateAudio, runOnFirstPointerDown } from "./audio-activate.js";
 import { addHallMolding } from "./molding.js";
+import { initDevMode } from "./dev-mode.js";
+import { createWallClickHelper } from "./wall-click.js";
 
 const canvas = document.createElement("canvas");
 
@@ -279,27 +281,20 @@ stage.addEventListener("webkitfullscreenchange", syncViewportSize); // Safari
 
 // #################################
 
-// FULL-BROWSER / WINDOWED TOGGLE (rebuild this after the CSS above)
+// FULL-BROWSER / WINDOWED TOGGLE
 // Default should be full browser; F toggles body.is-windowed for the small box.
 // Always call syncViewportSize() after changing size so the camera matches.
+initDevMode({ stage });
 
-// Toggle the CSS class that switches between full-browser and letterboxed.
 const toggleWindowed = () => {
-    // Add the class if missing, remove it if present.
     document.body.classList.toggle("is-windowed");
-    // Resize the WebGL drawing buffer + camera aspect to the new stage size.
     syncViewportSize();
 };
 
-// Listen for key presses on the whole page.
 document.addEventListener("keydown", e => {
-    // Only react to F / f.
     if (e.key === "f" || e.key === "F") {
-        // Don't steal F if the user is typing in a field.
         if (e.target.closest("input, textarea, [contenteditable]")) return;
-        // Stop the browser from doing anything else with F.
         e.preventDefault();
-        // Run the size toggle.
         toggleWindowed();
     }
 });
@@ -358,6 +353,9 @@ const room = new THREE.Mesh(
     [wallMat, wallMat, ceilingMat, floorMat, wallMat, wallMat]
 );
 scene.add(room);
+
+const wallClick = createWallClickHelper({ canvas, camera, stage, scene });
+wallClick.registerRoomBox(room);
 
 // Subtle dark gray lines on the four vertical corners of a room box.
 const addVerticalCornerLines = (width, height, depth, yOffset = 0, color=0xd2d2d2) => {
