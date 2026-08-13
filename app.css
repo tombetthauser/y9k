@@ -224,6 +224,50 @@ body.is-windowed #video-lightbox .video-lightbox-frame {
 body.is-dev-mode #wall-click-hud {
     display: block;
 }
+#dev-wall-upload-panel {
+    display: none;
+    position: absolute;
+    left: 16px;
+    bottom: 52px;
+    z-index: 10;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    pointer-events: auto;
+}
+body.is-dev-mode #dev-wall-upload-panel {
+    display: flex;
+}
+#dev-wall-upload-actions {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+}
+#dev-wall-upload:disabled,
+#dev-wall-upload-delete:disabled,
+#dev-wall-upload-reset:disabled {
+    opacity: 0.35;
+}
+#lightbox-delete {
+    display: none;
+    margin-top: 8px;
+    pointer-events: auto;
+}
+body.is-dev-mode #lightbox.has-user-art-delete #lightbox-delete {
+    display: inline-block;
+}
+.dev-wall-upload-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.dev-wall-upload-slider-row.is-disabled {
+    opacity: 0.35;
+}
+.dev-wall-upload-slider-row input[type="range"] {
+    width: 100px;
+}
 /* F toggles body.is-windowed → smaller letterboxed stage */
 body.is-windowed #stage,
 body.is-windowed canvas {

@@ -50,7 +50,7 @@ export function setupLightbox({
         } catch (_) {}
     })();
 
-    const playOpenCloseSfx = () => {
+    const playOpenSfx = () => {
         const ctx = ensureAudioCtx();
         if (!ctx || !sfxBuffer) return;
         const start = () => {
@@ -210,11 +210,11 @@ export function setupLightbox({
         root.classList.add("is-open");
         root.setAttribute("aria-hidden", "false");
         if (isSoundOn) {
-            playOpenCloseSfx();
+            playOpenSfx();
         }
     }
 
-    function close(isSoundOn = false) {
+    function close(_isSoundOn = false) {
         if (!isOpen()) return;
         root.classList.remove("is-open");
         root.setAttribute("aria-hidden", "true");
@@ -223,9 +223,6 @@ export function setupLightbox({
         caption.removeAttribute("href");
         caption.textContent = "";
         resetZoom();
-        if (isSoundOn) {
-            playOpenCloseSfx();
-        }
     }
 
     function isOpen() {

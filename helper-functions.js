@@ -23,11 +23,14 @@ const readUnmuted = (soundPrefKey) => {
 /**
  * @param {object} opts
  * @param {() => HTMLAudioElement} opts.ensureMusicAudio
+ * @param {() => void|Promise<void>} [opts.afterActivate]
+ *   Extra layers (e.g. light buzz) to start after music, if unmuted.
  * @param {string} [opts.soundPrefKey]
  * @returns {() => Promise<void>} checkAndActivateAudio
  */
 export function createCheckAndActivateAudio({
     ensureMusicAudio,
+    afterActivate = null,
     soundPrefKey = SOUND_PREF_KEY,
 }) {
     /**
@@ -38,12 +41,17 @@ export function createCheckAndActivateAudio({
         if (!readUnmuted(soundPrefKey)) return;
 
         const a = ensureMusicAudio();
-        if (!a.paused) return;
-
-        try {
-            await a.play();
-        } catch (_) {
-            // Still blocked or failed; a later gesture may retry if re-bound.
+        if (a.paused) {
+            try {
+                await a.play();
+            } catch (_) {
+                // Still blocked or failed; a later gesture may retry if re-bound.
+            }
+        }
+        if (typeof afterActivate === "function") {
+            try {
+                await afterActivate();
+            } catch (_) {}
         }
     };
 }
@@ -192,7 +200,7 @@ export function setupLightbox({
         } catch (_) {}
     })();
 
-    const playOpenCloseSfx = () => {
+    const playOpenSfx = () => {
         const ctx = ensureAudioCtx();
         if (!ctx || !sfxBuffer) return;
         const start = () => {
@@ -336,9 +344,10 @@ export function setupLightbox({
         try { stage.setPointerCapture(e.pointerId); } catch (_) {}
     };
 
-    function open(imageFile, isSoundOn = false) {
+    function open(imageFile, isSoundOn = false, displayName = null, opts = {}) {
         resetZoom();
         IS_SOUND_ON = isSoundOn;
+        currentSource = opts.source || null;
         img.onload = () => {
             requestAnimationFrame(() => {
                 measureFit();
@@ -347,16 +356,22 @@ export function setupLightbox({
             });
         };
         img.src = imageFile;
-        caption.href = imageFile;
-        caption.textContent = imageFile.split("/").pop();
+        caption.href = imageFile.startsWith("blob:") ? "#" : imageFile;
+        const label =
+            displayName ||
+            (imageFile.startsWith("blob:")
+                ? "uploaded image"
+                : imageFile.split("/").pop());
+        caption.textContent = label;
         root.classList.add("is-open");
         root.setAttribute("aria-hidden", "false");
+        syncDeleteButton();
         if (isSoundOn) {
-            playOpenCloseSfx();
+            playOpenSfx();
         }
     }
 
-    function close(isSoundOn = false) {
+    function close(_isSoundOn = false) {
         if (!isOpen()) return;
         root.classList.remove("is-open");
         root.setAttribute("aria-hidden", "true");
@@ -364,10 +379,9 @@ export function setupLightbox({
         img.removeAttribute("src");
         caption.removeAttribute("href");
         caption.textContent = "";
+        currentSource = null;
+        syncDeleteButton();
         resetZoom();
-        if (isSoundOn) {
-            playOpenCloseSfx();
-        }
     }
 
     function isOpen() {
@@ -489,7 +503,65 @@ export function setupLightbox({
         if (e.key === "Escape") close();
     });
 
-    return { open, close, isOpen, remeasure };
+    /** @type {THREE.Object3D|null} */
+    let currentSource = null;
+    /** @type {((art: THREE.Object3D) => void|Promise<void>)|null} */
+    let userArtDeleteHandler = null;
+
+    let deleteBtn = document.getElementById("lightbox-delete");
+    if (!deleteBtn) {
+        deleteBtn = document.createElement("button");
+        deleteBtn.id = "lightbox-delete";
+        deleteBtn.type = "button";
+        deleteBtn.textContent = "delete image";
+        deleteBtn.hidden = true;
+        const frame = root.querySelector(".lightbox-frame") || root;
+        frame.appendChild(deleteBtn);
+    }
+
+    const syncDeleteButton = () => {
+        const canDelete =
+            isDevMode() &&
+            !!currentSource?.userData?.isUserArt &&
+            typeof userArtDeleteHandler === "function";
+        deleteBtn.hidden = !canDelete;
+        deleteBtn.disabled = !canDelete;
+        root.classList.toggle("has-user-art-delete", canDelete);
+    };
+
+    deleteBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (deleteBtn.disabled || !currentSource || !userArtDeleteHandler) return;
+        const art = currentSource;
+        Promise.resolve(userArtDeleteHandler(art))
+            .catch((err) => console.warn("lightbox delete failed", err))
+            .finally(() => {
+                close(IS_SOUND_ON);
+            });
+    });
+
+    const moDev = new MutationObserver(syncDeleteButton);
+    moDev.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+
+    /**
+     * Wire delete for user-uploaded art (dev mode). Handler should remove
+     * the mesh and IndexedDB record (e.g. session.forget).
+     * @param {((art: THREE.Object3D) => void|Promise<void>)|null} fn
+     */
+    const setUserArtDeleteHandler = (fn) => {
+        userArtDeleteHandler = typeof fn === "function" ? fn : null;
+        syncDeleteButton();
+    };
+
+    return {
+        open,
+        close,
+        isOpen,
+        remeasure,
+        setUserArtDeleteHandler,
+        getCurrentSource: () => currentSource,
+    };
 }
 
 /**
@@ -784,6 +856,11 @@ export function createWallClickHelper({ canvas, camera, stage, scene } = {}) {
     let crosshair = null;
     let hasCrosshairPlacement = false;
 
+    /** @type {ReturnType<typeof describeHit>|null} */
+    let lastHitInfo = null;
+    /** @type {((info: NonNullable<ReturnType<typeof describeHit>>) => void)|null} */
+    let wallPickHandler = null;
+
     let tracking = false;
     let didDrag = false;
     let lastX = 0;
@@ -886,9 +963,10 @@ export function createWallClickHelper({ canvas, camera, stage, scene } = {}) {
             edge: { x1, z1, x2, z2 },
         });
         if (wall == null) {
-            // Derive cardinal label once matrix is set.
+            // Plane faces into the room; cardinal labels are which side of the
+            // room the wall sits on (outward), matching placeOnWall.
             normal.set(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), mesh.rotation.y);
-            mesh.userData.wall = wallNameFromNormal(normal.x, normal.z);
+            mesh.userData.wall = wallNameFromNormal(-normal.x, -normal.z);
         }
 
         scene.add(mesh);
@@ -931,8 +1009,9 @@ export function createWallClickHelper({ canvas, camera, stage, scene } = {}) {
 
         let name = obj.userData.wall;
         if (typeof name !== "string") {
+            // Face normal points into the room; label by outward side.
             normal.set(0, 0, 1).transformDirection(obj.matrixWorld);
-            name = wallNameFromNormal(normal.x, normal.z);
+            name = wallNameFromNormal(-normal.x, -normal.z);
         }
 
         return {
@@ -975,6 +1054,8 @@ export function createWallClickHelper({ canvas, camera, stage, scene } = {}) {
         const line = formatInfo(info);
         console.log(`[wall-click] ${line}`);
 
+        lastHitInfo = info;
+
         if (hud) {
             hud.textContent = line;
             hud.dataset.hasCoords = "1";
@@ -982,7 +1063,9 @@ export function createWallClickHelper({ canvas, camera, stage, scene } = {}) {
 
         // Crosshair is a developer-mode visual only; still move it while on.
         if (isDevMode()) placeCrosshair(hit);
-    };
+
+        if (typeof wallPickHandler === "function") wallPickHandler(info);
+    };;
 
     if (canvas) {
         canvas.addEventListener("pointerdown", (e) => {
@@ -1024,6 +1107,10 @@ export function createWallClickHelper({ canvas, camera, stage, scene } = {}) {
         addWallSegment,
         addWallsFromOutline,
         reportClick,
+        getLastHit: () => lastHitInfo,
+        onWallPick: (fn) => {
+            wallPickHandler = typeof fn === "function" ? fn : null;
+        },
     };
 }
 
@@ -1605,6 +1692,7 @@ const FIXTURE_OFF_COLOR = 0x585858;
  * @param {{ ambient?: number, directional?: number }} [opts.offIntensity]
  *   Defaults match the example hallway (0.05 / 0.04).
  * @param {number} [opts.offBackground=0x111111]
+ * @param {(on: boolean) => void} [opts.onChange]  Fired after on/off changes
  */
 export function createRoomLights({
     ambient,
@@ -1613,6 +1701,7 @@ export function createRoomLights({
     isOn = true,
     offIntensity = { ambient: 0.05, directional: 0.04 },
     offBackground = 0x111111,
+    onChange = null,
 } = {}) {
     const onIntensity = {
         ambient: ambient ? ambient.intensity : 1,
@@ -1659,10 +1748,12 @@ export function createRoomLights({
         setOn(next) {
             on = !!next;
             apply();
+            if (typeof onChange === "function") onChange(on);
         },
         toggle() {
             on = !on;
             apply();
+            if (typeof onChange === "function") onChange(on);
             return on;
         },
         /** Register a fixture diffuser face so it tracks room on/off. */
@@ -2330,7 +2421,7 @@ export function placeOnWall(
     halfW,
     bounds,
     wallInset = 0.05,
-    { heightFromFloor, floorY } = {}
+    { heightFromFloor, floorY, clamp = "edges" } = {}
 ) {
     let worldY = y;
     if (heightFromFloor != null) {
@@ -2347,9 +2438,13 @@ export function placeOnWall(
 
     const halfX = bounds.halfX ?? bounds.width / 2;
     const halfZ = bounds.halfZ ?? bounds.depth / 2;
-    const maxX =
-        wall === "north" || wall === "south" ? halfX - halfW : halfZ - halfW;
-    const lx = Math.max(-maxX, Math.min(maxX, x));
+    const span =
+        wall === "north" || wall === "south" ? halfX : halfZ;
+    // "edges": keep the whole plane on the wall. "center": allow the center
+    // out to the wall edge (~50% of the image can hang off).
+    const maxX = clamp === "center" ? span : span - halfW;
+    const lx =
+        maxX < 0 ? 0 : Math.max(-maxX, Math.min(maxX, x));
     const cx = bounds.centerX ?? 0;
     const cz = bounds.centerZ ?? 0;
 
@@ -2369,6 +2464,168 @@ export function placeOnWall(
         return false;
     }
     return true;
+}
+
+// =============================================================================
+// Door room label
+// =============================================================================
+
+/** Along-wall sign: +1 means increasing placeOnWall `x` is to the viewer's right. */
+const DOOR_LABEL_RIGHT_SIGN = {
+    north: 1,
+    south: -1,
+    west: -1,
+    east: 1,
+};
+
+/**
+ * Pull a room number from a path or URL (`5.html` → `"5"`).
+ * @param {string|null|undefined} path
+ * @returns {string|null}
+ */
+export function roomNumberFromPath(path) {
+    if (!path || typeof path !== "string") return null;
+    const clean = path.split("?")[0].split("#")[0];
+    const file = clean.split("/").pop() || "";
+    const m = file.match(/^(\d+)\.html$/i);
+    return m ? m[1] : null;
+}
+
+/**
+ * Galleries (numbered pages other than the central hall): current file number.
+ * Hallways (`index` / `7.html`): number from the door `href` destination.
+ * @param {string|number|null|undefined} explicit
+ * @param {string|null|undefined} href
+ * @returns {string|null}
+ */
+export function resolveDoorRoomLabel(explicit, href) {
+    if (explicit != null && String(explicit).length) return String(explicit);
+
+    const pagePath =
+        typeof location !== "undefined" ? location.pathname : "";
+    const fromPage = roomNumberFromPath(pagePath);
+    const fromHref = roomNumberFromPath(href);
+
+    const isHubPath =
+        !pagePath ||
+        /\/$/.test(pagePath) ||
+        /\/index\.html$/i.test(pagePath);
+    const isCentralHall = fromPage === "7";
+    const isHallway = isHubPath || isCentralHall || fromPage == null;
+
+    if (isHallway) return fromHref || fromPage;
+    return fromPage || fromHref;
+}
+
+/**
+ * Small raised plaque at the top-right of a door (viewer-facing).
+ * Fiddle sizes / colors via the constants at the top of this function.
+ *
+ * @param {object} opts
+ * @param {THREE.Scene} opts.scene
+ * @param {string} opts.wall
+ * @param {number} opts.doorAlong  placeOnWall along-wall `x` of the door center
+ * @param {number} opts.doorWidth
+ * @param {number} opts.doorHeight
+ * @param {number} opts.roomHalfY
+ * @param {ReturnType<typeof outlineBounds>} opts.bounds
+ * @param {number} [opts.wallInset=0.05]
+ * @param {string} opts.label
+ * @returns {THREE.Mesh|null}
+ */
+export function addDoorRoomLabel({
+    scene,
+    wall,
+    doorAlong,
+    doorWidth,
+    doorHeight,
+    roomHalfY,
+    bounds,
+    wallInset = 0.05,
+    label,
+} = {}) {
+    // --- fiddly defaults (edit these) ---
+    const BOX_W = 0.28;
+    const BOX_H = 0.36;
+    const BOX_D = 0.05;
+    const BOX_COLOR = 0xe4e4e4;
+    const FONT_COLOR = "#111111";
+    const FONT_SIZE_PX = 152;
+    const FONT_FAMILY = "Georgia, 'Times New Roman', Times, serif";
+    const GAP_FROM_DOOR = 0.08;
+    const INSET_FROM_DOOR_TOP = 0.06;
+    const WALL_FLUSH_PULL = 0.05;
+    const CANVAS_SIZE = 256;
+    // --- end fiddly defaults ---
+
+    if (!scene || !bounds || label == null || label === "") return null;
+    const text = String(label);
+    const right = DOOR_LABEL_RIGHT_SIGN[wall] ?? 1;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = CANVAS_SIZE;
+    canvas.height = CANVAS_SIZE;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    ctx.fillStyle = `#${BOX_COLOR.toString(16).padStart(6, "0")}`;
+    ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+    ctx.fillStyle = FONT_COLOR;
+    ctx.font = `600 ${FONT_SIZE_PX}px ${FONT_FAMILY}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, CANVAS_SIZE / 2, CANVAS_SIZE / 2 - FONT_SIZE_PX * 0.06);
+
+    const map = new THREE.CanvasTexture(canvas);
+    map.colorSpace = THREE.SRGBColorSpace;
+    map.magFilter = THREE.LinearFilter;
+    map.minFilter = THREE.LinearFilter;
+    map.needsUpdate = true;
+
+    const sideMat = new THREE.MeshStandardMaterial({ color: BOX_COLOR });
+    const faceMat = new THREE.MeshStandardMaterial({
+        map,
+        color: 0xffffff,
+        roughness: 0.85,
+        metalness: 0,
+    });
+    const plaque = new THREE.Mesh(
+        new THREE.BoxGeometry(BOX_W, BOX_H, BOX_D),
+        [sideMat, sideMat, sideMat, sideMat, faceMat, sideMat]
+    );
+
+    const along =
+        doorAlong + right * (doorWidth / 2 + GAP_FROM_DOOR + BOX_W / 2);
+    const worldY =
+        -roomHalfY + doorHeight - INSET_FROM_DOOR_TOP - BOX_H / 2;
+
+    if (
+        !placeOnWall(
+            plaque,
+            wall,
+            along,
+            worldY,
+            BOX_W / 2,
+            bounds,
+            wallInset
+        )
+    ) {
+        map.dispose();
+        faceMat.dispose();
+        sideMat.dispose();
+        plaque.geometry.dispose();
+        return null;
+    }
+
+    // Nudge out of the wall like a light-switch plate.
+    const out = BOX_D / 2 - WALL_FLUSH_PULL;
+    const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(plaque.quaternion);
+    plaque.position.addScaledVector(forward, out);
+
+    plaque.userData.isDoorLabel = true;
+    plaque.userData.label = text;
+    scene.add(plaque);
+    return plaque;
 }
 
 /**
@@ -2400,13 +2657,24 @@ export function createAddWallDoor({
      * @param {boolean} [options.locked=true]
      * @param {boolean} [options.bright=false]
      * @param {number} [options.x=0]  Along-wall offset from center
+     * @param {boolean} [options.isLabelled=false]
+     *   When true, mounts a room-number plaque at the door's top-right.
+     * @param {string|number|null} [options.label=null]
+     *   Optional plaque text override (otherwise derived from href / pathname).
      * @returns {Promise<THREE.Mesh|null>}
      */
     return function addWallDoor(
         wall,
         imageFile,
         doorHeight,
-        { href = null, locked = true, bright = false, x = 0 } = {}
+        {
+            href = null,
+            locked = true,
+            bright = false,
+            x = 0,
+            isLabelled = false,
+            label = null,
+        } = {}
     ) {
         return new Promise((resolve) => {
             textureLoader.load(imageFile, (tex) => {
@@ -2456,6 +2724,24 @@ export function createAddWallDoor({
                 door.userData.href = href;
                 clickable.push(door);
                 scene.add(door);
+
+                if (isLabelled) {
+                    const plaque = resolveDoorRoomLabel(label, href);
+                    if (plaque) {
+                        addDoorRoomLabel({
+                            scene,
+                            wall,
+                            doorAlong: x,
+                            doorWidth: imageWidth,
+                            doorHeight: imageHeight,
+                            roomHalfY,
+                            bounds,
+                            wallInset,
+                            label: plaque,
+                        });
+                    }
+                }
+
                 resolve(door);
             });
         });
@@ -2552,6 +2838,1176 @@ export function createAddWallImage({
             clickable.push(art);
             scene.add(art);
         });
+    };
+}
+
+/** Default world width (meters) for user-uploaded gallery art. */
+export const DEFAULT_USER_ART_WIDTH = 1.6;
+
+/**
+ * Map a wall-click `describeHit` result to `placeOnWall` args (AABB / gallery rooms).
+ * Uses world position so box faces and full-side outline segments both work.
+ *
+ * @param {{ wall: string, world: { x: number, y: number, z: number }, local?: { x: number, y: number } }|null|undefined} info
+ * @param {object} opts
+ * @param {number} opts.floorY
+ * @param {ReturnType<typeof outlineBounds>} [opts.bounds]
+ * @returns {{ wall: string, x: number, heightFromFloor: number }|null}
+ */
+export function hitToWallPlacement(info, { floorY, bounds } = {}) {
+    if (!info?.world || floorY == null) return null;
+    if (info.wall === "ceiling" || info.wall === "floor") return null;
+
+    let wall = info.wall;
+
+    // Prefer nearest AABB face so placement matches placeOnWall even if the
+    // hit's cardinal label was derived from an inward face normal.
+    if (bounds) {
+        const { minX, maxX, minZ, maxZ } = bounds;
+        const wx = info.world.x;
+        const wz = info.world.z;
+        const dN = Math.abs(wz - minZ);
+        const dS = Math.abs(wz - maxZ);
+        const dW = Math.abs(wx - minX);
+        const dE = Math.abs(wx - maxX);
+        const nearest = Math.min(dN, dS, dW, dE);
+        if (nearest === dN) wall = "north";
+        else if (nearest === dS) wall = "south";
+        else if (nearest === dW) wall = "west";
+        else wall = "east";
+    }
+
+    if (typeof wall !== "string") return null;
+
+    const cx = bounds?.centerX ?? 0;
+    const cz = bounds?.centerZ ?? 0;
+    const x =
+        wall === "north" || wall === "south"
+            ? info.world.x - cx
+            : info.world.z - cz;
+
+    return {
+        wall,
+        x,
+        heightFromFloor: info.world.y - floorY,
+    };
+}
+
+/**
+ * Resolve a path string, File, Blob, or existing object URL for TextureLoader.
+ * @param {string|Blob|File} imageSource
+ * @returns {{ url: string, displayName: string|null }}
+ */
+const resolveUserImageSource = (imageSource) => {
+    if (typeof imageSource === "string") {
+        return {
+            url: imageSource,
+            displayName: imageSource.startsWith("blob:")
+                ? "uploaded image"
+                : imageSource.split("/").pop() || null,
+        };
+    }
+    if (typeof Blob !== "undefined" && imageSource instanceof Blob) {
+        const name =
+            typeof File !== "undefined" &&
+            imageSource instanceof File &&
+            imageSource.name
+                ? imageSource.name
+                : "uploaded image";
+        return { url: URL.createObjectURL(imageSource), displayName: name };
+    }
+    console.warn("resolveUserImageSource: unsupported image source", imageSource);
+    return { url: "", displayName: null };
+};
+
+/**
+ * Like `createAddWallImage`, but accepts a local File/Blob (or path / object URL).
+ * Gallery / AABB rooms via `placeOnWall`. Persistence is handled by
+ * `createUserArtSession` when wired through `enableDevWallUpload`.
+ *
+ * @param {object} opts
+ * @param {THREE.Scene} opts.scene
+ * @param {THREE.TextureLoader} opts.textureLoader
+ * @param {number} opts.roomHalfY
+ * @param {number} [opts.floorY=-roomHalfY]
+ * @param {number} [opts.ceilingY=roomHalfY]
+ * @param {number} [opts.heightFromFloor=DEFAULT_ART_HEIGHT_FROM_FLOOR]
+ * @param {THREE.Object3D[]} opts.clickable
+ * @param {ReturnType<typeof outlineBounds>} opts.bounds
+ * @param {number} [opts.wallInset=0.05]
+ */
+export function createAddUserWallImage({
+    scene,
+    textureLoader,
+    roomHalfY,
+    floorY = -roomHalfY,
+    ceilingY = roomHalfY,
+    heightFromFloor = DEFAULT_ART_HEIGHT_FROM_FLOOR,
+    clickable,
+    bounds,
+    wallInset = 0.05,
+}) {
+    /**
+     * @param {string} wall
+     * @param {number} x  Along-wall offset from room center
+     * @param {string|Blob|File} imageSource
+     * @param {number} [imageWidth=DEFAULT_USER_ART_WIDTH]
+     * @param {object} [options]
+     * @param {number} [options.heightFromFloor]
+     * @returns {Promise<THREE.Mesh|null>}
+     */
+    return function addUserWallImage(
+        wall,
+        x,
+        imageSource,
+        imageWidth = DEFAULT_USER_ART_WIDTH,
+        { heightFromFloor: heightFromFloorOpt } = {}
+    ) {
+        const { url, displayName } = resolveUserImageSource(imageSource);
+        if (!url) return Promise.resolve(null);
+
+        return new Promise((resolve) => {
+            textureLoader.load(
+                url,
+                (tex) => {
+                    tex.colorSpace = THREE.SRGBColorSpace;
+                    tex.magFilter = THREE.NearestFilter;
+                    tex.minFilter = THREE.NearestFilter;
+
+                    const aspect = tex.image.width / tex.image.height;
+                    const imageHeight = imageWidth / aspect;
+
+                    const art = new THREE.Mesh(
+                        new THREE.PlaneGeometry(imageWidth, imageHeight),
+                        new THREE.MeshStandardMaterial({
+                            map: tex,
+                            transparent: true,
+                            alphaTest: 0.1,
+                            depthWrite: true,
+                        })
+                    );
+
+                    const roomH = ceilingY - floorY;
+                    // Center-clamp: allow ~50% of the image past floor/ceiling.
+                    const hffRaw = heightFromFloorOpt ?? heightFromFloor;
+                    const hff = Math.max(0, Math.min(roomH, hffRaw));
+
+                    if (
+                        !placeOnWall(
+                            art,
+                            wall,
+                            x,
+                            null,
+                            imageWidth / 2,
+                            bounds,
+                            wallInset,
+                            { heightFromFloor: hff, floorY, clamp: "center" }
+                        )
+                    ) {
+                        resolve(null);
+                        return;
+                    }
+
+                    const halfX = bounds.halfX ?? bounds.width / 2;
+                    const halfZ = bounds.halfZ ?? bounds.depth / 2;
+                    const maxAlong =
+                        wall === "north" || wall === "south" ? halfX : halfZ;
+                    const xClamped =
+                        maxAlong < 0
+                            ? 0
+                            : Math.max(-maxAlong, Math.min(maxAlong, x));
+                    const uX =
+                        maxAlong > 1e-6
+                            ? (xClamped + maxAlong) / (2 * maxAlong)
+                            : 0.5;
+                    const uY = roomH > 1e-6 ? hff / roomH : 0.5;
+
+                    art.userData.imageFile = url;
+                    art.userData.imageName = displayName;
+                    art.userData.isUserArt = true;
+                    art.userData.artWidth = imageWidth;
+                    art.userData.aspect = aspect;
+                    art.userData.placement = {
+                        wall,
+                        x: xClamped,
+                        heightFromFloor: hff,
+                        uX,
+                        uY,
+                    };
+                    clickable.push(art);
+                    scene.add(art);
+                    resolve(art);
+                },
+                undefined,
+                () => {
+                    console.warn("addUserWallImage: failed to load", displayName || url);
+                    resolve(null);
+                }
+            );
+        });
+    };
+}
+
+/**
+ * Along-wall / vertical travel for user art with center-at-edge limits
+ * (~50% of the image may hang off the wall / floor / ceiling).
+ *
+ * @param {object} opts
+ * @param {string} opts.wall
+ * @param {ReturnType<typeof outlineBounds>} opts.bounds
+ * @param {number} opts.floorY
+ * @param {number} opts.ceilingY
+ * @returns {{ maxAlong: number, roomH: number }}
+ */
+export function userArtTravelLimits({ wall, bounds, floorY, ceilingY }) {
+    const halfX = bounds.halfX ?? bounds.width / 2;
+    const halfZ = bounds.halfZ ?? bounds.depth / 2;
+    const maxAlong =
+        wall === "north" || wall === "south" ? halfX : halfZ;
+    return {
+        maxAlong: Math.max(0, maxAlong),
+        roomH: Math.max(0, ceilingY - floorY),
+    };
+}
+
+const clamp01 = (t) => Math.max(0, Math.min(1, t));
+
+/**
+ * Update user-hung gallery art size and/or normalized wall position.
+ * `uX` / `uY` are 0..1 across the wall (center may sit on the edge).
+ * Size changes keep existing uX/uY so relative placement stays put.
+ *
+ * @param {THREE.Mesh} art
+ * @param {object} [patch]
+ * @param {number} [patch.width]
+ * @param {number} [patch.uX]
+ * @param {number} [patch.uY]
+ * @param {object} ctx
+ * @param {ReturnType<typeof outlineBounds>} ctx.bounds
+ * @param {number} ctx.floorY
+ * @param {number} ctx.ceilingY
+ * @param {number} [ctx.wallInset=0.05]
+ * @returns {boolean}
+ */
+export function updateUserArtPlacement(
+    art,
+    patch = {},
+    { bounds, floorY, ceilingY, wallInset = 0.05 } = {}
+) {
+    if (!art?.userData?.isUserArt || !art.userData.placement) return false;
+    if (bounds == null || floorY == null || ceilingY == null) return false;
+
+    const aspect = art.userData.aspect;
+    if (!(aspect > 0)) return false;
+
+    const placement = art.userData.placement;
+    const wall = placement.wall;
+    const width =
+        patch.width != null ? patch.width : art.userData.artWidth;
+    if (!(width > 0)) return false;
+
+    const { maxAlong, roomH } = userArtTravelLimits({
+        wall,
+        bounds,
+        floorY,
+        ceilingY,
+    });
+
+    let uX = patch.uX;
+    let uY = patch.uY;
+    if (uX == null) {
+        uX =
+            placement.uX != null
+                ? placement.uX
+                : maxAlong > 1e-6
+                  ? (placement.x + maxAlong) / (2 * maxAlong)
+                  : 0.5;
+    }
+    if (uY == null) {
+        uY =
+            placement.uY != null
+                ? placement.uY
+                : roomH > 1e-6
+                  ? placement.heightFromFloor / roomH
+                  : 0.5;
+    }
+    uX = clamp01(uX);
+    uY = clamp01(uY);
+
+    const x = -maxAlong + uX * (2 * maxAlong);
+    const hff = uY * roomH;
+    const imageHeight = width / aspect;
+
+    if (width !== art.userData.artWidth) {
+        art.geometry.dispose();
+        art.geometry = new THREE.PlaneGeometry(width, imageHeight);
+    }
+
+    if (
+        !placeOnWall(art, wall, x, null, width / 2, bounds, wallInset, {
+            heightFromFloor: hff,
+            floorY,
+            clamp: "center",
+        })
+    ) {
+        return false;
+    }
+
+    art.userData.artWidth = width;
+    art.userData.placement = {
+        wall,
+        x,
+        heightFromFloor: hff,
+        uX,
+        uY,
+    };
+    return true;
+}
+
+/**
+ * Resize user-hung gallery art (keeps normalized X/Y on the wall).
+ * @returns {boolean}
+ */
+export function setUserArtWidth(art, width, ctx) {
+    return updateUserArtPlacement(art, { width }, ctx);
+}
+
+// =============================================================================
+// User art persistence (IndexedDB) — swappable for a remote store later
+// =============================================================================
+
+const USER_ART_DB_NAME = "y9k-user-art";
+const USER_ART_DB_VERSION = 1;
+
+const newPlacementId = () => {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID();
+    }
+    return `art-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const idbRequest = (req) =>
+    new Promise((resolve, reject) => {
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error || new Error("IndexedDB request failed"));
+    });
+
+const idbTxDone = (tx) =>
+    new Promise((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error || new Error("IndexedDB transaction failed"));
+        tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted"));
+    });
+
+/**
+ * Browser-local placement store (IndexedDB). Same method shape can later be
+ * implemented by a remote/backend adapter.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.dbName]
+ */
+export function createLocalPlacementStore({ dbName = USER_ART_DB_NAME } = {}) {
+    /** @type {Promise<IDBDatabase>|null} */
+    let dbPromise = null;
+
+    const openDb = () => {
+        if (dbPromise) return dbPromise;
+        if (typeof indexedDB === "undefined") {
+            return Promise.reject(new Error("IndexedDB is not available"));
+        }
+        dbPromise = new Promise((resolve, reject) => {
+            const req = indexedDB.open(dbName, USER_ART_DB_VERSION);
+            req.onupgradeneeded = () => {
+                const db = req.result;
+                if (!db.objectStoreNames.contains("placements")) {
+                    const placements = db.createObjectStore("placements", {
+                        keyPath: "id",
+                    });
+                    placements.createIndex("roomId", "roomId", { unique: false });
+                }
+                if (!db.objectStoreNames.contains("blobs")) {
+                    db.createObjectStore("blobs", { keyPath: "id" });
+                }
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () =>
+                reject(req.error || new Error("Failed to open user-art DB"));
+        });
+        return dbPromise;
+    };
+
+    return {
+        /**
+         * @param {string} roomId
+         * @returns {Promise<object[]>}
+         */
+        async list(roomId) {
+            const db = await openDb();
+            const tx = db.transaction("placements", "readonly");
+            const index = tx.objectStore("placements").index("roomId");
+            const rows = await idbRequest(index.getAll(roomId));
+            await idbTxDone(tx);
+            return Array.isArray(rows) ? rows : [];
+        },
+
+        /**
+         * @param {string} id
+         * @returns {Promise<Blob|null>}
+         */
+        async getBlob(id) {
+            const db = await openDb();
+            const tx = db.transaction("blobs", "readonly");
+            const row = await idbRequest(tx.objectStore("blobs").get(id));
+            await idbTxDone(tx);
+            return row?.blob instanceof Blob ? row.blob : null;
+        },
+
+        /**
+         * @param {object} opts
+         * @param {object} opts.placement
+         * @param {Blob} opts.blob
+         */
+        async put({ placement, blob }) {
+            if (!placement?.id || !(blob instanceof Blob)) {
+                throw new Error("placement store put: placement.id and blob required");
+            }
+            const db = await openDb();
+            const tx = db.transaction(["placements", "blobs"], "readwrite");
+            tx.objectStore("placements").put(placement);
+            tx.objectStore("blobs").put({ id: placement.id, blob });
+            await idbTxDone(tx);
+        },
+
+        /**
+         * @param {string} id
+         * @param {object} partial
+         */
+        async updateMeta(id, partial) {
+            const db = await openDb();
+            const tx = db.transaction("placements", "readwrite");
+            const store = tx.objectStore("placements");
+            const existing = await idbRequest(store.get(id));
+            if (!existing) {
+                await idbTxDone(tx);
+                return false;
+            }
+            store.put({
+                ...existing,
+                ...partial,
+                id,
+                updatedAt: Date.now(),
+            });
+            await idbTxDone(tx);
+            return true;
+        },
+
+        /**
+         * @param {string} id
+         */
+        async remove(id) {
+            const db = await openDb();
+            const tx = db.transaction(["placements", "blobs"], "readwrite");
+            tx.objectStore("placements").delete(id);
+            tx.objectStore("blobs").delete(id);
+            await idbTxDone(tx);
+        },
+    };
+}
+
+/**
+ * Build world x / heightFromFloor from normalized wall coords.
+ */
+const placementWorldFromUV = (wall, uX, uY, { bounds, floorY, ceilingY }) => {
+    const { maxAlong, roomH } = userArtTravelLimits({
+        wall,
+        bounds,
+        floorY,
+        ceilingY,
+    });
+    const uu = clamp01(uX ?? 0.5);
+    const vv = clamp01(uY ?? 0.5);
+    return {
+        x: -maxAlong + uu * (2 * maxAlong),
+        heightFromFloor: vv * roomH,
+        uX: uu,
+        uY: vv,
+    };
+};
+
+/**
+ * Live user-art meshes for one room, backed by a PlacementStore.
+ *
+ * @param {object} opts
+ * @param {ReturnType<typeof createLocalPlacementStore>} opts.store
+ * @param {string} opts.roomId
+ * @param {ReturnType<typeof createAddUserWallImage>} opts.addUserWallImage
+ * @param {THREE.Object3D[]} opts.clickable
+ * @param {ReturnType<typeof outlineBounds>} opts.bounds
+ * @param {number} opts.floorY
+ * @param {number} opts.ceilingY
+ * @param {number} [opts.wallInset=0.05]
+ */
+export function createUserArtSession({
+    store,
+    roomId,
+    addUserWallImage,
+    clickable,
+    bounds,
+    floorY,
+    ceilingY,
+    wallInset = 0.05,
+}) {
+    const placeCtx = { bounds, floorY, ceilingY, wallInset };
+
+    const metaFromArt = (art, id, createdAt) => {
+        const p = art.userData.placement;
+        const now = Date.now();
+        return {
+            id,
+            roomId,
+            wall: p.wall,
+            width: art.userData.artWidth,
+            uX: p.uX,
+            uY: p.uY,
+            imageName: art.userData.imageName || null,
+            createdAt: createdAt ?? art.userData.createdAt ?? now,
+            updatedAt: now,
+        };
+    };
+
+    return {
+        roomId,
+        store,
+
+        /**
+         * Load saved placements for this room into the scene.
+         * @returns {Promise<THREE.Mesh[]>}
+         */
+        async hydrate() {
+            if (!store || !roomId || typeof addUserWallImage !== "function") {
+                return [];
+            }
+            let rows = [];
+            try {
+                rows = await store.list(roomId);
+            } catch (err) {
+                console.warn("user art hydrate: list failed", err);
+                return [];
+            }
+
+            rows = [...rows].sort(
+                (a, b) => (a.updatedAt || a.createdAt || 0) - (b.updatedAt || b.createdAt || 0)
+            );
+
+            /** @type {THREE.Mesh[]} */
+            const meshes = [];
+            for (const row of rows) {
+                if (!row?.id || !row.wall) continue;
+                let blob = null;
+                try {
+                    blob = await store.getBlob(row.id);
+                } catch (err) {
+                    console.warn("user art hydrate: getBlob failed", row.id, err);
+                    continue;
+                }
+                if (!blob) {
+                    console.warn("user art hydrate: missing blob for", row.id);
+                    continue;
+                }
+
+                const { x, heightFromFloor, uX, uY } = placementWorldFromUV(
+                    row.wall,
+                    row.uX,
+                    row.uY,
+                    placeCtx
+                );
+                const url = URL.createObjectURL(blob);
+                try {
+                    const art = await addUserWallImage(
+                        row.wall,
+                        x,
+                        url,
+                        row.width || DEFAULT_USER_ART_WIDTH,
+                        { heightFromFloor }
+                    );
+                    if (!art) {
+                        URL.revokeObjectURL(url);
+                        continue;
+                    }
+                    art.userData.placementId = row.id;
+                    art.userData.createdAt = row.createdAt;
+                    if (row.imageName) art.userData.imageName = row.imageName;
+                    updateUserArtPlacement(
+                        art,
+                        { width: row.width, uX, uY },
+                        placeCtx
+                    );
+                    meshes.push(art);
+                } catch (err) {
+                    console.warn("user art hydrate: place failed", row.id, err);
+                    try {
+                        URL.revokeObjectURL(url);
+                    } catch (_) {}
+                }
+            }
+            return meshes;
+        },
+
+        /**
+         * Persist a newly placed mesh + its source File/Blob.
+         * @param {THREE.Mesh} art
+         * @param {Blob} blob
+         */
+        async remember(art, blob) {
+            if (!art?.userData?.isUserArt || !(blob instanceof Blob)) return null;
+            const id = art.userData.placementId || newPlacementId();
+            art.userData.placementId = id;
+            const placement = metaFromArt(art, id, art.userData.createdAt);
+            art.userData.createdAt = placement.createdAt;
+            await store.put({ placement, blob });
+            return placement;
+        },
+
+        /**
+         * Persist size/position changes (no blob rewrite).
+         * @param {THREE.Mesh} art
+         */
+        async sync(art) {
+            const id = art?.userData?.placementId;
+            if (!id || !art.userData?.placement) return false;
+            return store.updateMeta(id, {
+                wall: art.userData.placement.wall,
+                width: art.userData.artWidth,
+                uX: art.userData.placement.uX,
+                uY: art.userData.placement.uY,
+                imageName: art.userData.imageName || null,
+            });
+        },
+
+        /**
+         * Remove mesh from the scene and delete its store record.
+         * @param {THREE.Mesh} art
+         */
+        async forget(art) {
+            const id = art?.userData?.placementId;
+            removeUserWallImage(art, { clickable });
+            if (id) {
+                try {
+                    await store.remove(id);
+                } catch (err) {
+                    console.warn("user art forget: remove failed", id, err);
+                }
+            }
+            return true;
+        },
+
+        /**
+         * Remove every user-hung image for this room (scene + IndexedDB).
+         * @returns {Promise<number>} number of store rows removed
+         */
+        async forgetAll() {
+            let rows = [];
+            try {
+                rows = await store.list(roomId);
+            } catch (err) {
+                console.warn("user art forgetAll: list failed", err);
+                rows = [];
+            }
+
+            const meshes = Array.isArray(clickable)
+                ? clickable.filter((o) => o?.userData?.isUserArt)
+                : [];
+            for (const mesh of [...meshes]) {
+                removeUserWallImage(mesh, { clickable });
+            }
+
+            let removed = 0;
+            for (const row of rows) {
+                if (!row?.id) continue;
+                try {
+                    await store.remove(row.id);
+                    removed += 1;
+                } catch (err) {
+                    console.warn("user art forgetAll: remove failed", row.id, err);
+                }
+            }
+            return removed;
+        },
+    };
+}
+
+/**
+ * Remove user-hung gallery art from the scene and clickable list.
+ * Disposes geometry / material / map and revokes blob object URLs.
+ *
+ * @param {THREE.Mesh|null|undefined} art
+ * @param {object} [opts]
+ * @param {THREE.Object3D[]} [opts.clickable]
+ * @returns {boolean}
+ */
+export function removeUserWallImage(art, { clickable } = {}) {
+    if (!art?.userData?.isUserArt) return false;
+
+    if (Array.isArray(clickable)) {
+        const i = clickable.indexOf(art);
+        if (i >= 0) clickable.splice(i, 1);
+    }
+
+    if (art.parent) art.parent.remove(art);
+
+    const url = art.userData.imageFile;
+    if (typeof url === "string" && url.startsWith("blob:")) {
+        try {
+            URL.revokeObjectURL(url);
+        } catch (_) {}
+    }
+
+    const mat = art.material;
+    if (mat) {
+        if (mat.map) mat.map.dispose();
+        mat.dispose();
+    }
+    if (art.geometry) art.geometry.dispose();
+
+    art.userData.isUserArt = false;
+    return true;
+}
+
+/**
+ * Developer-mode control: after clicking a wall (crosshair), upload a local
+ * image and hang it at that spot. Size + X/Y% sliders adjust the last placed
+ * image (size also presets the next upload). Persists via `session` when set.
+ *
+ * @param {object} opts
+ * @param {ReturnType<typeof createWallClickHelper>} opts.wallClick
+ * @param {ReturnType<typeof createAddUserWallImage>} opts.addUserWallImage
+ * @param {THREE.Object3D[]} [opts.clickable]
+ * @param {ReturnType<typeof createUserArtSession>|null} [opts.session]
+ * @param {number} opts.floorY
+ * @param {number} opts.ceilingY
+ * @param {ReturnType<typeof outlineBounds>} [opts.bounds]
+ * @param {number} [opts.wallInset=0.05]
+ * @param {HTMLElement} [opts.stage]
+ * @param {number} [opts.defaultWidth=DEFAULT_USER_ART_WIDTH]
+ * @param {number} [opts.minWidth=0.5]
+ * @param {number} [opts.maxWidth=20]
+ * @param {(() => void)|null} [opts.playAppearSfx]  Page flip when a new image is hung
+ * @returns {{ panel: HTMLElement|null, button: HTMLButtonElement|null, deleteButton: HTMLButtonElement|null, input: HTMLInputElement|null, slider: HTMLInputElement|null, xSlider: HTMLInputElement|null, ySlider: HTMLInputElement|null, ready: Promise<void> }}
+ */
+export function initDevWallUpload({
+    wallClick,
+    addUserWallImage,
+    clickable,
+    session = null,
+    floorY,
+    ceilingY,
+    bounds,
+    wallInset = 0.05,
+    stage,
+    defaultWidth = DEFAULT_USER_ART_WIDTH,
+    minWidth = 0.5,
+    maxWidth = 20,
+    playAppearSfx = null,
+} = {}) {
+    const empty = {
+        panel: null,
+        button: null,
+        deleteButton: null,
+        input: null,
+        slider: null,
+        xSlider: null,
+        ySlider: null,
+        ready: Promise.resolve(),
+    };
+    const host = stage || document.getElementById("stage");
+    if (!host || !wallClick || typeof addUserWallImage !== "function") {
+        console.warn("initDevWallUpload: missing stage, wallClick, or addUserWallImage");
+        return empty;
+    }
+    if (ceilingY == null) {
+        console.warn("initDevWallUpload: ceilingY is required for resize");
+        return empty;
+    }
+
+    const placeCtx = { bounds, floorY, ceilingY, wallInset };
+
+    let panel = document.getElementById("dev-wall-upload-panel");
+    if (!panel) {
+        panel = document.createElement("div");
+        panel.id = "dev-wall-upload-panel";
+        host.appendChild(panel);
+    }
+
+    let actions = document.getElementById("dev-wall-upload-actions");
+    if (!actions) {
+        actions = document.createElement("div");
+        actions.id = "dev-wall-upload-actions";
+        panel.appendChild(actions);
+    }
+
+    let button = document.getElementById("dev-wall-upload");
+    if (!button) {
+        button = document.createElement("button");
+        button.id = "dev-wall-upload";
+        button.type = "button";
+        button.textContent = "place image";
+        actions.appendChild(button);
+    } else if (button.parentElement !== actions) {
+        actions.appendChild(button);
+    }
+
+    let deleteButton = document.getElementById("dev-wall-upload-delete");
+    if (!deleteButton) {
+        deleteButton = document.createElement("button");
+        deleteButton.id = "dev-wall-upload-delete";
+        deleteButton.type = "button";
+        deleteButton.textContent = "delete image";
+        actions.appendChild(deleteButton);
+    } else if (deleteButton.parentElement !== actions) {
+        actions.appendChild(deleteButton);
+    }
+
+    const ensureSliderRow = (rowId, sliderId, labelId, { min, max, step, prefix }) => {
+        let row = document.getElementById(rowId);
+        if (!row) {
+            row = document.createElement("div");
+            row.id = rowId;
+            row.className = "dev-wall-upload-slider-row";
+            panel.appendChild(row);
+        } else {
+            row.classList.add("dev-wall-upload-slider-row");
+        }
+        let nameEl = row.querySelector(".dev-wall-upload-slider-name");
+        if (!nameEl) {
+            nameEl = document.createElement("span");
+            nameEl.className = "dev-wall-upload-slider-name";
+            nameEl.textContent = prefix;
+            row.insertBefore(nameEl, row.firstChild);
+        } else {
+            nameEl.textContent = prefix;
+        }
+        let range = document.getElementById(sliderId);
+        if (!range) {
+            range = document.createElement("input");
+            range.id = sliderId;
+            range.type = "range";
+            range.min = String(min);
+            range.max = String(max);
+            range.step = String(step);
+            row.appendChild(range);
+        } else {
+            range.min = String(min);
+            range.max = String(max);
+            range.step = String(step);
+        }
+        let label = document.getElementById(labelId);
+        if (!label) {
+            label = document.createElement("span");
+            label.id = labelId;
+            label.className = "dev-wall-upload-slider-label";
+            row.appendChild(label);
+        }
+        return { row, range, label };
+    };
+
+    const legacySizeRow = document.getElementById("dev-wall-upload-size-row");
+    if (legacySizeRow && !legacySizeRow.classList.contains("dev-wall-upload-slider-row")) {
+        legacySizeRow.className = "dev-wall-upload-slider-row";
+    }
+
+    const size = ensureSliderRow(
+        "dev-wall-upload-size-row",
+        "dev-wall-upload-size",
+        "dev-wall-upload-size-label",
+        { min: minWidth, max: maxWidth, step: 0.05, prefix: "size" }
+    );
+    const posX = ensureSliderRow(
+        "dev-wall-upload-x-row",
+        "dev-wall-upload-x",
+        "dev-wall-upload-x-label",
+        { min: 0, max: 100, step: 1, prefix: "x" }
+    );
+    const posY = ensureSliderRow(
+        "dev-wall-upload-y-row",
+        "dev-wall-upload-y",
+        "dev-wall-upload-y-label",
+        { min: 0, max: 100, step: 1, prefix: "y" }
+    );
+
+    let resetButton = document.getElementById("dev-wall-upload-reset");
+    if (!resetButton) {
+        resetButton = document.createElement("button");
+        resetButton.id = "dev-wall-upload-reset";
+        resetButton.type = "button";
+        resetButton.textContent = "reset art";
+        panel.appendChild(resetButton);
+    } else {
+        panel.appendChild(resetButton);
+    }
+
+    const slider = size.range;
+    const xSlider = posX.range;
+    const ySlider = posY.range;
+
+    let input = document.getElementById("dev-wall-upload-input");
+    if (!input) {
+        input = document.createElement("input");
+        input.id = "dev-wall-upload-input";
+        input.type = "file";
+        input.accept = "image/*";
+        input.hidden = true;
+        panel.appendChild(input);
+    }
+
+    /** @type {THREE.Mesh|null} */
+    let lastArt = null;
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    let syncTimer = null;
+
+    const fmtWidth = (w) => `${Number(w).toFixed(2)}m`;
+    const fmtPct = (v) => `${Math.round(Number(v))}%`;
+
+    const syncLabels = () => {
+        size.label.textContent = fmtWidth(slider.value);
+        posX.label.textContent = fmtPct(xSlider.value);
+        posY.label.textContent = fmtPct(ySlider.value);
+    };
+
+    const syncPosFromArt = (art) => {
+        if (!art?.userData?.placement) return;
+        const { uX = 0.5, uY = 0.5 } = art.userData.placement;
+        xSlider.value = String(Math.round(clamp01(uX) * 100));
+        ySlider.value = String(Math.round(clamp01(uY) * 100));
+    };
+
+    const scheduleSync = () => {
+        if (!session || !lastArt) return;
+        if (syncTimer) clearTimeout(syncTimer);
+        syncTimer = setTimeout(() => {
+            session.sync(lastArt).catch((err) => {
+                console.warn("user art sync failed", err);
+            });
+        }, 120);
+    };
+
+    const syncEnabled = () => {
+        const hasHit = !!wallClick.getLastHit?.();
+        const on = isDevMode() && hasHit;
+        button.disabled = !on;
+        button.title = !isDevMode()
+            ? "enter developer mode"
+            : hasHit
+              ? "place an image at the crosshair"
+              : "click a wall first";
+        button.setAttribute("aria-label", button.title);
+
+        const canDelete = isDevMode() && !!lastArt;
+        deleteButton.disabled = !canDelete;
+        deleteButton.title = canDelete
+            ? "delete last placed image from the room and IndexedDB"
+            : "place an image first";
+        deleteButton.setAttribute("aria-label", deleteButton.title);
+
+        resetButton.disabled = !isDevMode();
+        resetButton.title = isDevMode()
+            ? "remove all uploaded art in this room from the scene and IndexedDB"
+            : "enter developer mode";
+        resetButton.setAttribute("aria-label", resetButton.title);
+
+        const sizeOn = isDevMode();
+        slider.disabled = !sizeOn;
+        size.row.classList.toggle("is-disabled", !sizeOn);
+        slider.title = lastArt
+            ? "resize last placed image (also size for next place)"
+            : "size for next placed image";
+
+        const posOn = isDevMode() && !!lastArt;
+        for (const { row, range, title } of [
+            {
+                row: posX.row,
+                range: xSlider,
+                title: "horizontal position on wall",
+            },
+            {
+                row: posY.row,
+                range: ySlider,
+                title: "vertical position on wall",
+            },
+        ]) {
+            range.disabled = !posOn;
+            row.classList.toggle("is-disabled", !posOn);
+            range.title = posOn ? title : "place an image first";
+        }
+
+        syncLabels();
+    };
+
+    const applyFromSliders = (patch) => {
+        if (!lastArt) return;
+        updateUserArtPlacement(lastArt, patch, placeCtx);
+        syncLabels();
+        scheduleSync();
+    };
+
+    const placeFromFile = (file) => {
+        if (!file || !file.type.startsWith("image/")) {
+            console.warn("initDevWallUpload: choose an image file");
+            return;
+        }
+        const info = wallClick.getLastHit?.();
+        const placement = hitToWallPlacement(info, { floorY, bounds });
+        if (!placement) {
+            console.warn("initDevWallUpload: click a wall first");
+            syncEnabled();
+            return;
+        }
+        const width = Number(slider.value) || defaultWidth;
+        addUserWallImage(
+            placement.wall,
+            placement.x,
+            file,
+            width,
+            { heightFromFloor: placement.heightFromFloor }
+        ).then(async (art) => {
+            if (art) {
+                lastArt = art;
+                slider.value = String(art.userData.artWidth ?? width);
+                syncPosFromArt(art);
+                if (typeof playAppearSfx === "function") playAppearSfx();
+                if (session) {
+                    try {
+                        await session.remember(art, file);
+                    } catch (err) {
+                        console.warn("user art remember failed", err);
+                    }
+                }
+            }
+            syncEnabled();
+        });
+    };
+
+    const deleteLastArt = async () => {
+        if (!lastArt) return;
+        const art = lastArt;
+        lastArt = null;
+        if (session) {
+            try {
+                await session.forget(art);
+            } catch (err) {
+                console.warn("user art forget failed", err);
+                removeUserWallImage(art, { clickable });
+            }
+        } else {
+            removeUserWallImage(art, { clickable });
+        }
+        syncEnabled();
+    };
+
+    const handleArtRemoved = (art) => {
+        if (art && lastArt === art) lastArt = null;
+        syncEnabled();
+    };
+
+    const resetAllArt = async () => {
+        lastArt = null;
+        if (session) {
+            try {
+                await session.forgetAll();
+            } catch (err) {
+                console.warn("user art reset failed", err);
+            }
+        } else if (Array.isArray(clickable)) {
+            for (const mesh of [...clickable.filter((o) => o?.userData?.isUserArt)]) {
+                removeUserWallImage(mesh, { clickable });
+            }
+        }
+        syncEnabled();
+    };
+
+    button.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (button.disabled) return;
+        input.value = "";
+        input.click();
+    });
+
+    deleteButton.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (deleteButton.disabled) return;
+        deleteLastArt();
+    });
+
+    resetButton.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (resetButton.disabled) return;
+        resetAllArt();
+    });
+
+    input.addEventListener("change", () => {
+        const file = input.files && input.files[0];
+        if (file) placeFromFile(file);
+    });
+
+    const bindSlider = (range, onInput) => {
+        range.addEventListener("pointerdown", (e) => e.stopPropagation());
+        range.addEventListener("click", (e) => e.stopPropagation());
+        range.addEventListener("input", onInput);
+    };
+
+    bindSlider(slider, () => {
+        syncLabels();
+        if (!lastArt) return;
+        applyFromSliders({ width: Number(slider.value) });
+    });
+    bindSlider(xSlider, () => {
+        applyFromSliders({ uX: Number(xSlider.value) / 100 });
+    });
+    bindSlider(ySlider, () => {
+        applyFromSliders({ uY: Number(ySlider.value) / 100 });
+    });
+
+    slider.value = String(defaultWidth);
+    xSlider.value = "50";
+    ySlider.value = "50";
+    syncLabels();
+
+    if (typeof wallClick.onWallPick === "function") {
+        wallClick.onWallPick(() => syncEnabled());
+    }
+
+    const mo = new MutationObserver(syncEnabled);
+    mo.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+    syncEnabled();
+
+    const ready = (async () => {
+        if (!session) return;
+        try {
+            const meshes = await session.hydrate();
+            if (meshes.length) {
+                lastArt = meshes[meshes.length - 1];
+                slider.value = String(
+                    lastArt.userData.artWidth ?? defaultWidth
+                );
+                syncPosFromArt(lastArt);
+            }
+            syncEnabled();
+        } catch (err) {
+            console.warn("user art hydrate failed", err);
+        }
+    })();
+
+    return {
+        panel,
+        button,
+        deleteButton,
+        resetButton,
+        input,
+        slider,
+        xSlider,
+        ySlider,
+        ready,
+        handleArtRemoved,
+        resetAllArt,
     };
 }
 
@@ -2778,6 +4234,9 @@ export function createMusicControls({
     musicPath,
     volume = 0.25,
     sfxVolume = 1,
+    /** Optional looping layer (e.g. fluorescent buzz) gated by room lights. */
+    lightBuzzPath = null,
+    lightBuzzVolume = 0.2,
     toggleEl = document.getElementById("music-toggle"),
     soundPrefKey = SOUND_PREF_KEY,
 } = {}) {
@@ -2798,7 +4257,9 @@ export function createMusicControls({
     };
 
     let IS_SOUND_ON = readSoundPref();
+    let lightsOn = true;
     let musicAudio = null;
+    let lightBuzzAudio = null;
 
     const ensureMusicAudio = () => {
         if (musicAudio) return musicAudio;
@@ -2806,6 +4267,32 @@ export function createMusicControls({
         musicAudio.loop = true;
         musicAudio.volume = volume;
         return musicAudio;
+    };
+
+    const ensureLightBuzzAudio = () => {
+        if (!lightBuzzPath) return null;
+        if (lightBuzzAudio) return lightBuzzAudio;
+        lightBuzzAudio = new Audio(lightBuzzPath);
+        lightBuzzAudio.loop = true;
+        lightBuzzAudio.volume = lightBuzzVolume;
+        return lightBuzzAudio;
+    };
+
+    const syncLightBuzz = async () => {
+        const a = ensureLightBuzzAudio();
+        if (!a) return;
+        try {
+            if (IS_SOUND_ON && lightsOn) {
+                if (a.paused) await a.play();
+            } else {
+                a.pause();
+            }
+        } catch (_) {}
+    };
+
+    const setLightsOn = (on) => {
+        lightsOn = !!on;
+        syncLightBuzz();
     };
 
     const syncMusicToggleUi = () => {
@@ -2835,6 +4322,7 @@ export function createMusicControls({
         }
         writeSoundPref(IS_SOUND_ON);
         syncMusicToggleUi();
+        await syncLightBuzz();
     };
 
     if (toggleEl) {
@@ -2850,6 +4338,7 @@ export function createMusicControls({
         try {
             await ensureMusicAudio().play();
         } catch (_) {}
+        await syncLightBuzz();
         syncMusicToggleUi();
     };
 
@@ -2869,6 +4358,7 @@ export function createMusicControls({
 
     const checkAndActivateAudio = createCheckAndActivateAudio({
         ensureMusicAudio,
+        afterActivate: syncLightBuzz,
         soundPrefKey,
     });
     runOnFirstPointerDown(checkAndActivateAudio);
@@ -2880,6 +4370,8 @@ export function createMusicControls({
         playSfx,
         restore,
         syncMusicToggleUi,
+        setLightsOn,
+        syncLightBuzz,
     };
 }
 
@@ -3012,11 +4504,62 @@ export function bindOrbitPointer({
 }
 
 // =============================================================================
+// View facing (cardinal) — localStorage only, for door transitions
+// =============================================================================
+
+const VIEW_FACING_KEY = "y9k-view-facing";
+const VIEW_FACINGS = new Set(["north", "south", "east", "west"]);
+
+/**
+ * Map travel/facing direction to orbit angle.
+ * angle=0 → camera on +Z looking toward −Z (north).
+ */
+export function viewFacingToAngle(facing) {
+    switch (facing) {
+        case "north":
+            return 0;
+        case "south":
+            return Math.PI;
+        case "east":
+            return -Math.PI / 2;
+        case "west":
+            return Math.PI / 2;
+        default:
+            return 0;
+    }
+}
+
+/**
+ * @param {string} [fallback="north"]
+ * @returns {"north"|"south"|"east"|"west"}
+ */
+export function readStoredViewFacing(fallback = "north") {
+    try {
+        const v = localStorage.getItem(VIEW_FACING_KEY);
+        if (v && VIEW_FACINGS.has(v)) return v;
+    } catch (_) {}
+    return VIEW_FACINGS.has(fallback) ? fallback : "north";
+}
+
+/**
+ * Persist cardinal facing for the next room load (set when entering a door).
+ * @param {string} facing  north|south|east|west (usually door.userData.wall)
+ */
+export function writeStoredViewFacing(facing) {
+    if (!VIEW_FACINGS.has(facing)) return;
+    try {
+        localStorage.setItem(VIEW_FACING_KEY, facing);
+    } catch (_) {}
+}
+
+// =============================================================================
 // Room app bootstrap
 // =============================================================================
 
 const DEFAULT_DOOR_LOCKED_SOUND = "music/door-soft-complete.mp3";
 const DEFAULT_DOOR_UNLOCKED_SOUND = "music/door-soft-complete.mp3";
+const DEFAULT_LIGHT_SWITCH_SOUND = "music/door-locked.mp3";
+const DEFAULT_PAGE_SFX = "music/page-3.mp3";
 
 /**
  * Canvas, renderer, scene, camera, music, viewport, orbit, wall-click, optional lightbox.
@@ -3034,6 +4577,9 @@ const DEFAULT_DOOR_UNLOCKED_SOUND = "music/door-soft-complete.mp3";
 export function createRoomApp({
     musicPath,
     musicVolume = 0.25,
+    /** Optional looping fluorescent buzz; plays over music while lights are on. */
+    lightBuzzPath = null,
+    lightBuzzVolume = 0.2,
     /** Absolute camera Y (overrides heightFromFloor when set). */
     camY = null,
     orbitRadius = 1.4,
@@ -3058,11 +4604,18 @@ export function createRoomApp({
     lightboxSfxVolume = 1,
     doorLockedSound = DEFAULT_DOOR_LOCKED_SOUND,
     doorUnlockedSound = DEFAULT_DOOR_UNLOCKED_SOUND,
+    lightSwitchSound = DEFAULT_LIGHT_SWITCH_SOUND,
+    pageSfx = DEFAULT_PAGE_SFX,
     ambientLight = 0.05,
     directionalLight = 0.04,
     directionalPosition = [1, 3, 2],
     /** Initial on/off for `roomLights` (scene lights + registered fixtures). */
     lightsOn = true,
+    /**
+     * When true, unlocked doors act locked while room lights are off
+     * (locked SFX, no navigation). Gallery rooms only.
+     */
+    lockDoorsWhenLightsOff = false,
     onHit = null,
 } = {}) {
     const resolveCamY = (fromFloor, floor) =>
@@ -3090,6 +4643,8 @@ export function createRoomApp({
     const music = createMusicControls({
         musicPath,
         volume: musicVolume,
+        lightBuzzPath,
+        lightBuzzVolume,
     });
 
     const lightbox = enableLightbox
@@ -3101,7 +4656,7 @@ export function createRoomApp({
         : null;
 
     const clickable = [];
-    let angle = 0;
+    let angle = viewFacingToAngle(readStoredViewFacing("north"));
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -3146,7 +4701,9 @@ export function createRoomApp({
         // Match example hallway darkness when off.
         offIntensity: { ambient: 0.05, directional: 0.04 },
         offBackground: 0x111111,
+        onChange: (on) => music.setLightsOn(on),
     });
+    music.setLightsOn(lightsOn);
 
     const defaultOnHit = (obj) => {
         if (obj.userData.isVideoScreen) {
@@ -3156,26 +4713,36 @@ export function createRoomApp({
         }
         if (obj.userData.isLightSwitch) {
             if (obj.userData.isDisabled !== false) {
-                music.playSfx(doorLockedSound);
+                music.playSfx(lightSwitchSound);
                 return;
             }
             roomLights.toggle();
-            music.playSfx(doorLockedSound);
+            music.playSfx(lightSwitchSound);
             return;
         }
         if (obj.userData.isDoor) {
-            if (obj.userData.locked) {
+            if (
+                obj.userData.locked ||
+                (lockDoorsWhenLightsOff && !roomLights.isOn())
+            ) {
                 music.playSfx(doorLockedSound);
                 return;
             }
             const href = obj.userData.href;
+            const wall = obj.userData.wall;
+            if (typeof wall === "string") writeStoredViewFacing(wall);
             music.playSfx(doorUnlockedSound).then(() => {
                 if (href) window.location.href = href;
             });
             return;
         }
         if (obj.userData.imageFile && lightbox) {
-            lightbox.open(obj.userData.imageFile, music.isSoundOn());
+            lightbox.open(
+                obj.userData.imageFile,
+                music.isSoundOn(),
+                obj.userData.imageName || null,
+                { source: obj }
+            );
         }
     };
 
@@ -3264,6 +4831,92 @@ export function createRoomApp({
             : null,
     });
 
+    /**
+     * Gallery-only: hang local images at the wall-click crosshair in developer mode.
+     * Call after `createRoomLayout` so bounds / floorY match the room.
+     * Persists placements in IndexedDB (hydrate on load) by default.
+     */
+    const enableDevWallUpload = ({
+        bounds,
+        floorY: uploadFloorY = viewFloorY,
+        ceilingY,
+        roomHalfY = -uploadFloorY,
+        wallInset = 0.05,
+        heightFromFloor = DEFAULT_ART_HEIGHT_FROM_FLOOR,
+        defaultWidth = DEFAULT_USER_ART_WIDTH,
+        roomId = typeof location !== "undefined" ? location.pathname : "/",
+        persist = true,
+        store = null,
+    } = {}) => {
+        if (!bounds) {
+            console.warn("enableDevWallUpload: bounds are required");
+            return {
+                button: null,
+                input: null,
+                addUserWallImage: null,
+                session: null,
+                ready: Promise.resolve(),
+            };
+        }
+        const resolvedCeilingY =
+            ceilingY != null ? ceilingY : uploadFloorY + DEFAULT_ROOM_HEIGHT;
+        const addUserWallImage = createAddUserWallImage({
+            scene,
+            textureLoader,
+            roomHalfY,
+            floorY: uploadFloorY,
+            ceilingY: resolvedCeilingY,
+            heightFromFloor,
+            clickable,
+            bounds,
+            wallInset,
+        });
+
+        const placementStore =
+            persist === false
+                ? null
+                : store || createLocalPlacementStore();
+        const session = placementStore
+            ? createUserArtSession({
+                  store: placementStore,
+                  roomId,
+                  addUserWallImage,
+                  clickable,
+                  bounds,
+                  floorY: uploadFloorY,
+                  ceilingY: resolvedCeilingY,
+                  wallInset,
+              })
+            : null;
+
+        const ui = initDevWallUpload({
+            wallClick,
+            addUserWallImage,
+            clickable,
+            session,
+            floorY: uploadFloorY,
+            ceilingY: resolvedCeilingY,
+            bounds,
+            wallInset,
+            stage,
+            defaultWidth,
+            playAppearSfx: () => music.playSfx(pageSfx, lightboxSfxVolume),
+        });
+
+        if (lightbox && typeof lightbox.setUserArtDeleteHandler === "function") {
+            lightbox.setUserArtDeleteHandler(async (art) => {
+                if (session) {
+                    await session.forget(art);
+                } else {
+                    removeUserWallImage(art, { clickable });
+                }
+                ui.handleArtRemoved?.(art);
+            });
+        }
+
+        return { ...ui, addUserWallImage, session };
+    };
+
     return {
         THREE,
         canvas,
@@ -3283,6 +4936,7 @@ export function createRoomApp({
         setViewHeight,
         startLoop,
         createPropFactories,
+        enableDevWallUpload,
         playDoorSound: music.playSfx,
         doorLockedSound,
         doorUnlockedSound,

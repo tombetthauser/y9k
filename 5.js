@@ -25,7 +25,9 @@ const DOOR_HEIGHT = 4;
 const WALL_INSET = 0.05;
 
 const app = createRoomApp({
-    musicPath: "music/birds.mp3",
+    musicPath: "music/wind-indoors-1-muffled.mp3",
+    lightBuzzPath: "music/light-buzz.mp3",
+    lockDoorsWhenLightsOff: true,
     floorY: -DEFAULT_ROOM_HEIGHT / 2,
     orbitRadius: 2.2,
     background: 0xf0f0f0,
@@ -94,6 +96,14 @@ const layout = createRoomLayout({
 });
 
 const { roomHalfY, floorY, ceilingY, bounds, walls } = layout;
+
+app.enableDevWallUpload({
+    bounds,
+    floorY,
+    ceilingY,
+    roomHalfY,
+    wallInset: WALL_INSET,
+});
 
 const addWallDoor = createAddWallDoor({
     scene,
@@ -197,8 +207,9 @@ addWallVideoScreen("west", -1.8, 2.6, {
     const doorX = bounds.halfX - doorWidth / 2 - 0.85;
     addWallDoor("south", "images/door-1.jpg", DOOR_HEIGHT, {
         locked: false,
-        href: "./hall-example.html",
+        href: "./7.html",
         x: doorX,
+        isLabelled: true,
     });
 
     const switchScale = 1.55;
@@ -207,6 +218,11 @@ addWallVideoScreen("west", -1.8, 2.6, {
         scale: switchScale,
         switches: 1,
         isDisabled: false,
+    });
+
+    // Welcome note beside the switch, a little larger than the plate.
+    addWallImage("south", switchX - 0.46, "images/welcome.jpg", 0.38, {
+        heightFromFloor: DOOR_HEIGHT / 2,
     });
 
     // South wall: xFromLeft is measured from +X when facing the wall.

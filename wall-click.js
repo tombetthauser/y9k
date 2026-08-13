@@ -171,9 +171,10 @@ export function createWallClickHelper({ canvas, camera, stage, scene } = {}) {
             edge: { x1, z1, x2, z2 },
         });
         if (wall == null) {
-            // Derive cardinal label once matrix is set.
+            // Plane faces into the room; cardinal labels are which side of the
+            // room the wall sits on (outward), matching placeOnWall.
             normal.set(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), mesh.rotation.y);
-            mesh.userData.wall = wallNameFromNormal(normal.x, normal.z);
+            mesh.userData.wall = wallNameFromNormal(-normal.x, -normal.z);
         }
 
         scene.add(mesh);
@@ -216,8 +217,9 @@ export function createWallClickHelper({ canvas, camera, stage, scene } = {}) {
 
         let name = obj.userData.wall;
         if (typeof name !== "string") {
+            // Face normal points into the room; label by outward side.
             normal.set(0, 0, 1).transformDirection(obj.matrixWorld);
-            name = wallNameFromNormal(normal.x, normal.z);
+            name = wallNameFromNormal(-normal.x, -normal.z);
         }
 
         return {
