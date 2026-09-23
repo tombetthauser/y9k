@@ -1,14 +1,14 @@
 import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
-import { createAddElectricalBox } from "./electrical-box.js";
-import { createAddFoldingChairs } from "./folding-chairs.js";
-import { createCheckAndActivateAudio, runOnFirstPointerDown } from "./audio-activate.js";
-import { createAddVent, ventPositionsAlongWall } from "./vent.js";
-import { createAddLightFixture, lightPositionsAlong } from "./light-fixture.js";
-import { createAddBoxStack } from "./box-stack.js";
-import { createAddLightSwitch } from "./light-switch.js";
-import { addHallMolding } from "./molding.js";
-import { initDevMode } from "./dev-mode.js";
-import { createWallClickHelper } from "./wall-click.js";
+import { createAddElectricalBox } from "../props/electrical-box.js";
+import { createAddFoldingChairs } from "../props/folding-chairs.js";
+import { createCheckAndActivateAudio, runOnFirstPointerDown } from "../lib/audio-activate.js";
+import { createAddVent, ventPositionsAlongWall } from "../props/vent.js";
+import { createAddLightFixture, lightPositionsAlong } from "../props/light-fixture.js";
+import { createAddBoxStack } from "../props/box-stack.js";
+import { createAddLightSwitch } from "../props/light-switch.js";
+import { addHallMolding } from "../props/molding.js";
+import { initDevMode } from "../lib/dev-mode.js";
+import { createWallClickHelper } from "../lib/wall-click.js";
 
 const canvas = document.createElement("canvas");
 const stage = document.getElementById("stage");

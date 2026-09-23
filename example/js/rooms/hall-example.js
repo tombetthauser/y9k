@@ -13,7 +13,7 @@ import {
     loadMapOntoMaterial,
     outlineBounds,
     CEILING_TILE_WORLD_SIZE,
-} from "./helper-functions.js";
+} from "../lib/helper-functions.js";
 
 const ROOM_HEIGHT = 3.75;
 const DOOR_HEIGHT = 3.2;

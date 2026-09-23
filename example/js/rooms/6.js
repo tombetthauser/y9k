@@ -1,9 +1,9 @@
 import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
-import { setupLightbox } from "./lightbox.js";
-import { createCheckAndActivateAudio, runOnFirstPointerDown } from "./audio-activate.js";
-import { addHallMolding } from "./molding.js";
-import { initDevMode } from "./dev-mode.js";
-import { createWallClickHelper } from "./wall-click.js";
+import { setupLightbox } from "../lib/lightbox.js";
+import { createCheckAndActivateAudio, runOnFirstPointerDown } from "../lib/audio-activate.js";
+import { addHallMolding } from "../props/molding.js";
+import { initDevMode } from "../lib/dev-mode.js";
+import { createWallClickHelper } from "../lib/wall-click.js";
 
 const canvas = document.createElement("canvas");
 

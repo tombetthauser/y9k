@@ -16,7 +16,7 @@ import {
     DEFAULT_ROOM_HEIGHT,
     DEFAULT_ART_HEIGHT_FROM_FLOOR,
     CEILING_TILE_WORLD_SIZE,
-} from "./helper-functions.js";
+} from "../lib/helper-functions.js";
 
 const ROOM_WIDTH = 12;
 const ROOM_DEPTH = 12;

@@ -18,7 +18,7 @@ import {
     loadMapOntoMaterial,
     DEFAULT_ROOM_HEIGHT,
     CEILING_TILE_WORLD_SIZE,
-} from "./helper-functions.js";
+} from "../lib/helper-functions.js";
 
 const ROOM_WIDTH = 12;
 const ROOM_DEPTH = 12;
