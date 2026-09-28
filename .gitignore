@@ -1,3 +1,6 @@
 # Full cached videos exceed GitHub's 100MB limit; keep locally only
 example/images/video-cache/NCaK35DQ4uk.mp4
 .DS_Store
+
+data/*.sqlite
+media/

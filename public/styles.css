@@ -1,0 +1,24 @@
+body {
+    color: white;
+    background-color: black;
+    font-family: serif;
+}
+
+button {
+    cursor: pointer;
+    border: 4px outset lightgray;
+    background-color: lightgray;
+    font-family: serif;
+}
+
+.disabled {
+    cursor: not-allowed;
+    color: lightgray;
+}
+
+.room-image {
+    display: block;
+    width: 30%;
+    height: auto;
+    margin-top: 1rem;
+}
