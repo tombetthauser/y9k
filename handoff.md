@@ -16,7 +16,7 @@ Each room:
 - Has four possible adjacent neighbors
 - May have deterministic doors on the north, east, south and west edges
 - Can be generated directly from its URL without storing every room in a database
-- May later contain persistent user-generated content such as uploaded images, videos, titles, annotations or other room-specific changes
+- May contain persistent user-generated images hung on a wall. The text page is the current interface. The rooms in `example/` are the intended 3D presentation of the same stored placement.
 
 The architectural goal is intentionally simple:
 
@@ -1053,14 +1053,17 @@ actual media files
 Example DB metadata:
 
 ```text
-id          482
-room_id     c8
-type        image
-filename    482.jpg
-width       1600
-height      1067
-bytes       438211
-created_at  ...
+id                482
+room_id           c8
+filename          482.jpg
+mime_type         image/jpeg
+pixel_width       1600
+pixel_height      1067
+wall              0
+x                 0
+y                 0
+width             90
+created_at        ...
 ```
 
 Actual file:
@@ -1806,9 +1809,9 @@ It is responsible for:
 - HTML rendering
 - potentially invoking FFmpeg where appropriate
 
-Earlier JavaScript examples were exploratory.
+The text page is the interface being built now.
 
-The current intended canonical implementation is PHP.
+The Three.js rooms in `example/` are the later presentation of the same rooms. They are not a separate way of placing art. Hand-placed pictures in those files are reference scenes. A picture a user adds is stored on its `media` row, and both interfaces read that row.
 
 ---
 
@@ -1840,7 +1843,7 @@ This is important for scalability and conceptual simplicity.
 
 # 52. Likely Early Database Tables
 
-Exact schema remains open, but likely early entities include:
+Early entities:
 
 ```text
 media
@@ -1849,22 +1852,25 @@ users
 annotations
 ```
 
-Possible `media` fields:
+`media` is decided. The other entities stay open until their behavior is decided.
+
+`media` fields:
 
 ```text
 id
 room_id
-type
 filename
-original_filename
 mime_type
+pixel_width
+pixel_height
+wall
+x
+y
 width
-height
-bytes
 created_at
 ```
 
-The schema should remain intentionally modest until product behavior requires more.
+`pixel_width` and `pixel_height` describe the file, in pixels. `width` is how wide the picture hangs. Display height is not stored. It is `width * pixel_height / pixel_width`. Lengths are centimeters. See "Image placement on a wall" below.
 
 ---
 
@@ -1881,6 +1887,29 @@ room_id = "c8"
 ```
 
 This keeps database storage aligned with canonical URLs and avoids arbitrary integer-size limitations.
+
+## Image placement on a wall
+
+Lengths in this project are centimeters. Three.js has no unit of its own. This project uses one unit as one centimeter for rooms and for pictures, so a 10 foot by 10 foot room with an 8 foot ceiling is 304.8 by 304.8 by 243.84. The scenes in `example/` were drawn with meter-scale numbers. Those files are reference scenes. Room geometry built for stored pictures uses centimeters.
+
+Each uploaded image stores where it hangs. The text map and the 3D room both read these fields. They do not invent a position from upload order.
+
+```text
+wall     index of one edge in the room outline
+x        centimeters from the center of that wall to the center of the image
+y        centimeters from the center of that wall to the center of the image
+width    centimeters, the hanging width of the image
+```
+
+A rectangular room is an outline of four edges. A hallway is the same kind of outline with more edges, so `wall` is not limited to four compass names. The facing of an edge, north, east, south, or west, is computed from the outline. The order of edges around the outline is fixed. Changing that order is a migration, because existing `wall` values would point at different edges.
+
+`x` is positive to the right when standing inside the room and facing that wall. `y` is positive up. Both are measured to the center of the image, which is where a Three.js plane is positioned. `x = 0` and `y = 0` hang the picture in the center of that wall. Display height grows equally above and below that center.
+
+The 3D scene places the plane on the chosen outline edge, `x` centimeters from the edge's midpoint and `y` centimeters from its vertical center, just in front of the wall.
+
+A new upload receives an initial placement: 90 centimeters wide, centered on a wall, cycling through the outline, then stepping 120 centimeters sideways. That initial value is the stored position. Moving the image later updates the same columns.
+
+Rows created before these columns existed have them set to null. Those images are unplaced until a placement is written.
 
 ---
 
@@ -1941,12 +1970,13 @@ Still to define:
 
 ## Persistent room state
 
+Image placement on a wall is stored on the `media` row. See "Image placement on a wall" above.
+
 Still to define:
 
 - whether rooms can have custom titles
 - whether rooms have owners
-- whether users can modify room appearance
-- whether procedural properties can ever be overridden
+- whether procedural properties other than hanging images can be overridden
 
 ## Authentication
 
@@ -1972,6 +2002,8 @@ Once the project has persistent content, these become part of the world's identi
 - door probability
 - room classification rule
 - generation-version semantics
+- world unit: 1 unit = 1 centimeter
+- wall-local image placement: `wall` is an outline-edge index, `x` and `y` are the image center relative to that wall's center, `width` is the hanging width, height is derived from the pixel aspect
 
 Any change to these should be treated as a world-generation migration.
 
@@ -2052,6 +2084,10 @@ SQLite is used first.
 A MySQL adapter is prepared for later migration.
 
 Media files live on an external USB SSD.
+
+Lengths are centimeters. One Three.js unit is one centimeter.
+
+An uploaded image stores its wall, and the center position and width of the picture on that wall.
 
 Image processing uses Imagick.
 

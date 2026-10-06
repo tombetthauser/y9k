@@ -695,7 +695,7 @@ These can be added without changing the addressing system:
 - multiple world seeds
 - location-based door-density zones
 - deterministic room themes
-- seeded artwork or gallery contents
+- user-placed artwork, stored on the media row as a wall index plus x, y, and width in centimeters, measured from the center of that wall to the center of the image
 - persistent user edits layered over generated defaults
 - special doors
 - portals
