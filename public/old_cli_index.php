@@ -18,13 +18,13 @@ require_once __DIR__ . '/../src/database.php';
 require_once __DIR__ . '/../src/tools.php';
 
 $statement = database()->prepare(
-    'SELECT id, filename FROM media WHERE room_id = :room_id ORDER BY id ASC'
+    'SELECT id, filename FROM things WHERE room = :room ORDER BY id ASC'
 );
 
 $requestId = $_GET['room'] ?? '0';
 $roomId = encodeBase36(decodeBase36($requestId));
 
-$statement->execute(['room_id' => $roomId]);
+$statement->execute(['room' => $roomId]);
 $images = $statement->fetchAll();
 
 if ($roomId !== $requestId) {

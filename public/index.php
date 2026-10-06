@@ -33,10 +33,10 @@ $key = ($doors['north']['exists'] ? 'd' : '-')
 $doorsCount = substr_count($key, 'd');
 
 $statement = database()->prepare(
-    'SELECT id, filename FROM media WHERE room_id = :room_id ORDER BY id DESC'
+    'SELECT id, filename FROM things WHERE room = :room ORDER BY id DESC'
 );
 
-$statement->execute(['room_id' => $roomId]);
+$statement->execute(['room' => $roomId]);
 $images = $statement->fetchAll();
 
 ?>
@@ -102,6 +102,10 @@ $images = $statement->fetchAll();
         <?php if ($doorsCount < 2): ?>
             <form action="upload.php" method="post" enctype="multipart/form-data">
                 <input type="hidden" name="room" value="<?= htmlspecialchars($roomId, ENT_QUOTES, 'UTF-8') ?>">
+                <input type="hidden" name="wall" value="0">
+                <input type="hidden" name="x" value="0">
+                <input type="hidden" name="y" value="23">
+                <input type="hidden" name="width" value="90">
                 <label>
                     <!-- --&gt; <a href="#">add an image</a> -->
                     --&gt; <span id="formlink">add an image</span>

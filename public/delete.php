@@ -13,12 +13,12 @@ if ($id === false || $id === null || $id < 1) {
 }
 
 $statement = database()->prepare(
-    'SELECT filename FROM media WHERE id = :id AND room_id = :room_id'
+    'SELECT filename FROM things WHERE id = :id AND room = :room'
 );
 
 $statement->execute([
     'id' => $id,
-    'room_id' => $roomId,
+    'room' => $roomId,
 ]);
 
 $image = $statement->fetch();
@@ -32,12 +32,12 @@ if ($image !== false) {
     }
 
     $delete = database()->prepare(
-        'DELETE FROM media WHERE id = :id AND room_id = :room_id'
+        'DELETE FROM things WHERE id = :id AND room = :room'
     );
 
     $delete->execute([
         'id' => $id,
-        'room_id' => $roomId,
+        'room' => $roomId,
     ]);
 }
 

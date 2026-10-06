@@ -21,17 +21,19 @@ function database(): PDO
     $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
 
     $pdo->exec(
-        'CREATE TABLE IF NOT EXISTS media (
+        'CREATE TABLE IF NOT EXISTS things (
             id INTEGER PRIMARY KEY,
             filename TEXT NOT NULL,
-            mime_type TEXT NOT NULL,
-            room_id TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            room TEXT NOT NULL,
+            wall INTEGER,
+            x REAL,
+            y REAL,
+            width REAL
         )'
     );
 
     $pdo->exec(
-        "CREATE INDEX IF NOT EXISTS media_room_id ON media (room_id)"
+        'CREATE INDEX IF NOT EXISTS things_room ON things (room)'
     );
 
     return $pdo;

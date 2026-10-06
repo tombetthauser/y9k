@@ -62,15 +62,17 @@ if ($upload['size'] > MAX_UPLOAD_BYTES) {
 
 try {
     $statement = database()->prepare(
-        'INSERT INTO media (filename, mime_type, room_id, created_at)
-        VALUES (:filename, :mime_type, :room_id, :created_at)'
+        'INSERT INTO things (filename, room, wall, x, y, width)
+        VALUES (:filename, :room, :wall, :x, :y, :width)'
     );
 
     $statement->execute([
         'filename' => basename($storedPath),
-        'mime_type' => $mimeType,
-        'room_id' => $roomId,
-        'created_at' => gmdate('c'),
+        'room' => $roomId,
+        'wall' => $_POST['wall'],
+        'x' => $_POST['x'],
+        'y' => $_POST['y'],
+        'width' => $_POST['width'],
     ]);
 } catch (Throwable $error) {
     unlink($storedPath);

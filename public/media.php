@@ -12,8 +12,18 @@ if ($id === false || $id === null || $id < 1) {
 }
 
 $statement = database()->prepare(
-    'SELECT filename, mime_type FROM media WHERE id = :id'
+    'SELECT filename FROM things WHERE id = :id'
 );
+
+// $filename = basename($image['filename']);
+
+$types = [
+    'jpg' => 'image/jpeg',
+    'jpeg' => 'image/jpeg',
+    'png' => 'image/png',
+    'gif' => 'image/gif',
+    'webp' => 'image/webp',
+];
 
 $statement->execute(['id' => $id]);
 $image = $statement->fetch();
@@ -24,6 +34,7 @@ if ($image === false) {
 }
 
 $filename = basename($image['filename']);
+$extension = strtolower(pathinfo($filename, PATHINFO_EXTENSION ));
 $path = dirname(__DIR__) . '/media/images/' . $filename;
 
 if ($filename !== $image['filename'] || !is_file($path)) {
@@ -31,7 +42,7 @@ if ($filename !== $image['filename'] || !is_file($path)) {
     exit;
 }
 
-header('Content-Type: ' . $image['mime_type']);
+header('Content-Type: ' . ($types[$extension] ?? 'application/octet-stream'));
 header('X-Content-Type-Options: nosniff');
 header('Content-Length: ' . (string) filesize($path));
 readfile($path);
