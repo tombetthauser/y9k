@@ -5,8 +5,8 @@ declare(strict_types=1);
 require_once __DIR__ . '/../src/database.php';
 require_once __DIR__ . '/../src/tools.php';
 
-const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
-const MAX_IMAGE_DIMENSIONS = 8000;
+// const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+// const MAX_IMAGE_DIMENSIONS = 8000;
 
 $mimeExtensions = [
     'image/jpeg' => 'jpg',
@@ -14,6 +14,10 @@ $mimeExtensions = [
     'image/gif' => 'gif',
     'image/webp' => 'webp',
 ];
+
+if (empty($_POST) && empty($_FILES)) {
+    die('Upload failed!');
+}
 
 $roomId = encodeBase36(decodeBase36($_POST['room'] ?? ''));
 $upload = $_FILES['image'] ?? null;
@@ -31,9 +35,9 @@ if ($extension === null || $dimensions === false) {
     die('Not a supported image file!');
 }
 
-if ($dimensions[0] > MAX_IMAGE_DIMENSIONS || $dimensions[1] > MAX_IMAGE_DIMENSIONS) {
-    die('Image height or width too large!');
-}
+// if ($dimensions[0] > MAX_IMAGE_DIMENSIONS || $dimensions[1] > MAX_IMAGE_DIMENSIONS) {
+//     die('Image height or width too large!');
+// }
 
 $imagesDirectory = __DIR__ . '/images';
 // $storedPath = $imagesDirectory . '/' . bin2hex(random_bytes(16)) . '.' . $extension;
@@ -56,9 +60,9 @@ if (!move_uploaded_file($tempPath, $storedPath)) {
     die('Failed to save image!');
 }
 
-if ($upload['size'] > MAX_UPLOAD_BYTES) {
-    die('Image is too big!');
-}
+// if ($upload['size'] > MAX_UPLOAD_BYTES) {
+//     die('Image is too big!');
+// }
 
 try {
     $statement = database()->prepare(
