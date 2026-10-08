@@ -2,8 +2,12 @@
 
 declare(strict_types=1);
 
-const WORLD_SEED = 'v1';
-const DOOR_PROBABILITY = 0.3504888163;
+const WORLD_SEED = 'v6'; // <-- room 0, tom, erin, alex, cody, daniel, jon all are galleries
+const DOOR_PROBABILITY = 0.4; // <-- 0-20 moves to find a room
+// const DOOR_PROBABILITY = 0.5; // <-- 5-20 moves to find a room
+// const DOOR_PROBABILITY = 0.6; // <-- 20-30 moves to find a room
+// const DOOR_PROBABILITY = 0.7; // <-- can barely find a room
+// const DOOR_PROBABILITY = 0.8; // <-- can't find a room
 
 function decodeBase36(string $roomId): GMP
 {
@@ -172,4 +176,73 @@ function getRoomDoors(string $roomId): array
     }
 
     return $doors;
+}
+
+function roomLetters(string $map, array $spots, array $images): array
+// draws the room again with letters added for images
+{
+    $lines = explode("\n", $map);
+    $groups = [];
+    foreach ($spots as $spot) {
+        $groups[$spot['letter']] = [];
+    }
+    $unplaced = [];
+    foreach ($images as $image) {
+        $spot = null;
+        if ($image['wall'] !== null && $image['x'] !== null) {
+            $wall = (int) $image['wall'];
+            $x = (float) $image['x'];
+            foreach ($spots as $currspot) {
+                if ($currspot['wall'] !== $wall) continue;
+                if ($currspot['xmin'] !== null && $x < $currspot['xmin']) continue;
+                if ($currspot['xmax'] !== null && $x >= $currspot['xmax']) continue;
+                // if we get this far the current spot contains the current image we're iterating through
+                $spot = $currspot;
+                break;
+            }
+        }
+        // if no spot is claimed keep it off the ascii map
+        if ($spot === null) {
+            $unplaced[] = $image;
+            continue;
+        }
+        // store the picture under it's letter and add the letter to the map
+        $groups[$spot['letter']][] = $image;
+        $lines[$spot['row']][$spot['col']] = $spot['letter'];
+    }
+    // return the map and the groups and any unplaced images
+    return [
+        'map' => implode("\n", $lines),
+        'groups' => $groups,
+        'unplaced' => $unplaced,
+    ];
+}
+
+function randomRoom(): string
+{
+    return encodeBase36(gmp_init(random_int(0, 36 ** 6 - 1)));
+}
+
+function lengthPhrase(int $feet): string
+{
+    if ($feet < 5800) {
+        return formatInt((string) $feet) . ' ' . ($feet === 1 ? 'foot' : 'feet');
+    }
+
+    $miles = number_format($feet / 5280, 1);
+    return $miles === '1.0' ? '1 mile' : $miles . ' miles';
+}
+
+function spiralFeet(string $roomId): array
+{
+        [$x, $y] = indexToCoordinate(decodeBase36($roomId));
+        $x = (float) gmp_strval($x);
+        $y = (float) gmp_strval($y);
+        $north = $y < 0 ? 'north' : ($y > 0 ? 'south' : '');
+        $east = $x < 0 ? 'east' : ($x > 0 ? 'west' : '');
+        return [
+            'span' => (int) spiralDetails($roomId)['width'] * 12,
+            'feet' => (int) round(12 * hypot($x, $y)),
+            'direction' => trim($north . ' ' . $east),
+        ];
 }
