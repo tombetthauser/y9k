@@ -24,16 +24,27 @@ function database(): PDO
         'CREATE TABLE IF NOT EXISTS things (
             id INTEGER PRIMARY KEY,
             filename TEXT NOT NULL,
+            filekey TEXT NOT NULL UNIQUE,
             room TEXT NOT NULL,
-            wall INTEGER,
-            x REAL,
-            y REAL,
-            width REAL
+            wall TEXT,
+            x TEXT,
+            y TEXT,
+            width TEXT
         )'
     );
 
     $pdo->exec(
         'CREATE INDEX IF NOT EXISTS things_room ON things (room)'
+    );
+
+    $pdo->exec(
+        'CREATE TABLE IF NOT EXISTS holes (
+            room_a TEXT NOT NULL,
+            room_b TEXT NOT NULL,
+            is_hole INTEGER NOT NULL CHECK (is_hole IN (0, 1)),
+            PRIMARY KEY (room_a, room_b),
+            CHECK (room_a < room_b)
+        )'
     );
 
     return $pdo;

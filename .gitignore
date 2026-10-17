@@ -4,3 +4,7 @@ example/images/video-cache/NCaK35DQ4uk.mp4
 
 data/*.sqlite
 media/
+
+data/images/
+
+data/log.txt
