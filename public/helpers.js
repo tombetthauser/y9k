@@ -36,10 +36,30 @@ export const createRoomStorage = (id, { endpoint = "index.php", onChange = () =>
             form.set(key, String(value));
         if (file)
             form.set("image", file);
-        const res = await fetch(url, { method: "POST", body: form, headers: { Accept: "application/json" } });
-        const data = await res.json();
-        if (!res.ok || !data.ok)
-            throw new Error(data.error || "Could not save the change.");
+        // Attach local file details even when the web server rejects the request before PHP runs.
+        const fileDetails = file ? `\nFile: ${file.name}\nFile size: ${file.size.toLocaleString()} bytes (${(file.size / 1048576).toFixed(2)} MiB)\nBrowser file type: ${file.type || "unknown"}` : "";
+        let res;
+        try {
+            res = await fetch(url, { method: "POST", body: form, headers: { Accept: "application/json" } });
+        } catch (error) {
+            throw new Error(`Network request failed: ${error.message}${fileDetails}`);
+        }
+        let raw;
+        try { raw = await res.text(); }
+        catch (error) { throw new Error(`Could not read server response: ${error.message}\nHTTP ${res.status}${fileDetails}`); }
+        let data;
+        try { data = JSON.parse(raw); }
+        catch {
+            // Treat server-generated HTML as plain text, never as modal markup.
+            const excerpt = raw.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 800);
+            const reason = res.status === 413 ? "The server rejected the request as too large."
+                : "The server did not return the expected JSON response.";
+            throw new Error(`${reason}\nHTTP ${res.status} ${res.statusText}${fileDetails}\nResponse: ${excerpt || "empty response"}`);
+        }
+        if (!res.ok || !data?.ok) {
+            const diagnostics = Object.entries(data?.diagnostics ?? {}).map(([key, value]) => `${key}: ${value}`).join("\n");
+            throw new Error(`${data?.error || "Could not save the change."}\nHTTP ${res.status}${fileDetails}${diagnostics ? "\n" + diagnostics : ""}`);
+        }
         return data;
     };
     return {
@@ -908,6 +928,9 @@ export class Room {
         const form = panel.querySelector("form"), fields = form.elements;
         const status = panel.querySelector("[role=status]");
         const filename = panel.querySelector(".wall-editor-filename");
+        // Preserve diagnostic line breaks and wrap long filenames or server messages.
+        status.style.whiteSpace = "pre-wrap";
+        status.style.overflowWrap = "anywhere";
         let id = null, file = null, saved = null, busy = false;
         const idle = [];
         const halfWidth = () => (fields.wall.value === "north" || fields.wall.value === "south"
@@ -959,7 +982,7 @@ export class Room {
             [...fields].forEach(field => field.disabled = true);
             status.textContent = "";
             try { await action(); }
-            catch (error) { status.textContent = error.message.toLowerCase(); }
+            catch (error) { status.textContent = error.message; }
             finally {
                 busy = false;
                 [...fields].forEach(field => field.disabled = false);

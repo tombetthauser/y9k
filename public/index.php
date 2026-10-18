@@ -81,7 +81,7 @@
     $roomInfo = "*NOT AN EXIT\n"
         . 'Exit Sign Facing Spiral Center: ' . ($exitWall ?? 'none') . "\n\n"
         . $roomInfo . "\n*doors do not follow spiral progression\n"
-        . "*system version 1.6\n";
+        . "*system version 1.7\n";
 
 
     // From old index.php - identify the door layout and count its doors
@@ -114,8 +114,29 @@
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $action = (string) ($_POST['action'] ?? '');
         $res = ['ok' => true];
+        // Diagnostics describe the request without exposing server paths or stack traces.
+        $upload = $_FILES['image'] ?? null;
+        $diagnostics = [
+            'upload_max_filesize' => ini_get('upload_max_filesize'),
+            'post_max_size' => ini_get('post_max_size'),
+            'request_bytes' => $_SERVER['CONTENT_LENGTH'] ?? 'unknown',
+            'php_upload_error' => is_array($upload) ? ($upload['error'] ?? UPLOAD_ERR_NO_FILE) : 'no file received',
+        ];
+        if (is_array($upload)) {
+            $diagnostics['received_file_bytes'] = $upload['size'] ?? 'unknown';
+            $diagnostics['reported_file_type'] = $upload['type'] ?? 'unknown';
+        }
 
         try {
+            // PHP clears form fields and files when the entire request exceeds post_max_size.
+            $postLimit = trim((string) ini_get('post_max_size'));
+            $unit = strtolower(substr($postLimit, -1));
+            $postLimitBytes = (float) $postLimit * match ($unit) {
+                'g' => 1073741824, 'm' => 1048576, 'k' => 1024, default => 1,
+            };
+            if ($postLimitBytes > 0 && (float) ($_SERVER['CONTENT_LENGTH'] ?? 0) > $postLimitBytes) {
+                throw new RuntimeException('The request exceeds the server post_max_size limit.');
+            }
             // Placement metadata uses the same cm fields as the text interface
             if ($action === 'upload' || $action === 'move') {
                 if (!$gallery) throw new RuntimeException('Artwork can only be added or moved in galleries.');
@@ -140,17 +161,29 @@
             if ($action === 'upload') {
                 $upload = $_FILES['image'] ?? null;
 
-                if (!is_array($upload) || ($upload['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
-                    throw new RuntimeException('Upload failed.');
+                $uploadError = is_array($upload) ? ($upload['error'] ?? UPLOAD_ERR_NO_FILE) : UPLOAD_ERR_NO_FILE;
+                if ($uploadError !== UPLOAD_ERR_OK) {
+                    $reason = match ($uploadError) {
+                        UPLOAD_ERR_INI_SIZE => 'The file exceeds the server upload_max_filesize limit.',
+                        UPLOAD_ERR_FORM_SIZE => 'The file exceeds the form upload size limit.',
+                        UPLOAD_ERR_PARTIAL => 'Only part of the file was received. Retry the upload.',
+                        UPLOAD_ERR_NO_FILE => 'The server received no image file.',
+                        UPLOAD_ERR_NO_TMP_DIR => 'The server upload temporary directory is unavailable.',
+                        UPLOAD_ERR_CANT_WRITE => 'The server could not write the uploaded file to disk.',
+                        UPLOAD_ERR_EXTENSION => 'A PHP extension stopped the upload.',
+                        default => 'Unknown PHP upload error.',
+                    };
+                    throw new RuntimeException($reason);
                 }
                 
                 $tmp = $upload['tmp_name'];
                 $mime = (new finfo(FILEINFO_MIME_TYPE))->file($tmp);
                 $exts = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp'];
+                $diagnostics['detected_file_type'] = $mime ?: 'unknown';
                 $ext = $exts[$mime] ?? null;
 
                 if ($ext === null || getimagesize($tmp) === false) {
-                    throw new RuntimeException('Not a supported image file.');
+                    throw new RuntimeException('The image could not be accepted. Supported formats: JPEG, PNG, GIF, WebP. HEIC/HEIF is not supported.');
                 }
 
                 $original = basename(str_replace('\\', '/', (string) ($upload['name'] ?? '')));
@@ -233,7 +266,10 @@
             }
         } catch (Throwable $error) {
             http_response_code(400);
-            $res = ['ok' => false, 'error' => $error->getMessage()];
+            error_log('Room edit failed: ' . $error);
+            $message = $error instanceof RuntimeException && !$error instanceof PDOException
+                ? $error->getMessage() : 'The server could not process this change. Check the server error log.';
+            $res = ['ok' => false, 'error' => $message, 'diagnostics' => $diagnostics];
         }
 
         // Form returns to this page - JS requests receive JSON
