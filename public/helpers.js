@@ -1108,19 +1108,28 @@ export class Room {
             }
         });
         this.app.canvas.addEventListener("pointercancel", () => { touchStart = previousTap = null; });
-        // A stationary 1.65-second press edits artwork; dragging still rotates the view.
+        // Hold empty walls to add artwork, or existing artwork to edit; dragging cancels either hold.
         let hold = null, origin = null;
         const cancelHold = () => { clearTimeout(hold); hold = origin = null; };
         this.app.canvas.addEventListener("pointerdown", event => {
             cancelHold();
             this._heldArtwork = null;
-            if (event.button !== 0 || blocked()) return;
+            if (event.button !== 0 || event.isPrimary === false || blocked()) return;
             const hit = pick(event), art = hit?.object;
+            const emptyWall = art && this.app.wallClick.walls.includes(art);
             const imageId = art?.userData.roomImageId;
-            if (!art?.userData.editable || !this.images.has(String(imageId))) return;
+            if (!emptyWall && (!art?.userData.editable || !this.images.has(String(imageId)))) return;
             origin = { x: event.clientX, y: event.clientY, pointerId: event.pointerId };
+            // Keep the original press location even if the browser later releases pointer capture.
+            const point = { clientX: event.clientX, clientY: event.clientY };
             hold = setTimeout(async () => {
-                if (blocked() || !this.images.has(String(imageId))) return;
+                if (blocked()) return;
+                if (emptyWall) {
+                    previousTap = touchStart = null;
+                    await openWallEditor(point);
+                    return;
+                }
+                if (!this.images.has(String(imageId))) return;
                 this._heldArtwork = imageId;
                 await this._closeModals();
                 if (!this.images.has(String(imageId))) return;

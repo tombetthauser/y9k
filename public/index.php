@@ -81,7 +81,7 @@
     $roomInfo = "*NOT AN EXIT\n"
         . 'Exit Sign Facing Spiral Center: ' . ($exitWall ?? 'none') . "\n\n"
         . $roomInfo . "\n*doors do not follow spiral progression\n"
-        . "*system version 1.2\n";
+        . "*system version 1.4\n";
 
 
     // From old index.php - identify the door layout and count its doors
@@ -96,6 +96,19 @@
     // Room navigation uses clean URLs; form submissions still use the PHP endpoint.
     $roomBase = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/index.php')), '/') . '/';
     $url = 'index.php?room=' . rawurlencode($roomId);
+    // Render sharing metadata on the server so SMS previews do not need JavaScript.
+    $roomTitle = ($gallery ? 'Gallery ' : 'Room ') . strtoupper($roomId);
+    $zalgoTitle = 'ḧ̴̜̙̏̈́́͋́́͆͝t̵̛̪͇̺̰͕̱̑̀̀͗̏̍t̷͔͋̕p̵̼͗͗ş̶̮̝̻̝͎̉̔̽͆͂̿͒̕ͅͅ:̴̖̟͆̒̾͑̋́̽̀͛͐/̵͕̲͇̳͗̐̽̊͌̈́͆̕͠/̴̧̪̙͑̑̽͘y̸̛̫̬̩̙̝̞̳̬̋̅̆̄̓̊̏͌͠9̸̨̥̣̥͉̜̖̗̩̺̓̀́̃͌̋͘͘͠k̸̡͔̟̜͕͇͋̂̉̓̌̃͌͂̕.̸̡̗̝̤͈̺̽̆͆̋̄͛͒̔x̸̢̛͔̦̼͍̲͇̮̤͙̔̾̌̍͑̃͗͝y̴̢̪͉͎̲͎̽͛͋̉̑̂͜z̴̼̈̈́/̸̡̥͉̅̀̽̏̈̋̇͋̚͝';
+    $previewTitle = '[' . $roomTitle . '] ' . $zalgoTitle;
+    $previewDescription = 'A̵̩͍̩̺͗̒̎͝ͅͅn̷̠̙̻̥̻͈͙̅͗͛̎ͅ ̵̥̭͈͓̮̼͎̄͂́͛̐̇̾͝ī̵̡̬̱͕̞̦̈́́̇͋̊͊̆̿̚n̵̼̳̻͍̏̀͐f̴̙̰̀́̾̾͛̓̀̓̿ĩ̷̧̳̯͕̗̪͖̰͜n̵̛͇̥̻̉̇̒̑͛̕i̶̢̧̦̲͖̫͙̐̊͌́̅̕t̸̜͇̄̍̑͑̍ͅe̴̮͌̌ ̸̡̱͙̜̭͍̓̋̈̔͊͝g̸͎̤̩̯̺̈́̋r̴͖̐̔͐̽̾į̵̫̦̟͚̗̺̖̩̄̈͆̋̉̂̇͊ḑ̴̢̥̜̥̘̼̼̓̏̓̽̓̋ ̶̹̖͙̃o̷̧̙̍̄͗͗͐̆̑̾̈͘f̶̗̌̑̒̓̆̑̈́̽̐͘ ̸̛̤̹̯̖̬͙̦͂͗̀́̒̿̈́́r̵̞͉̠̳͎̣̫̲̟͝ͅo̸̢͎̜̼̝̦̠͎͖̾͜ȯ̷̧̰͉̫͖̩̼̙̦͌̾͊̀m̷̢̢͈̱̭͌̂͗́͌͐͗͆ś̸͙͖̰̲̲̒̌̔͛.̴̡̙̤̥͔̱͙̏̆͌̃̅̌̍̽';
+    // Respect HTTPS forwarded by the deployment's reverse proxy as well as direct HTTPS.
+    $scheme = (($_SERVER['HTTPS'] ?? '') !== '' && ($_SERVER['HTTPS'] ?? '') !== 'off')
+        || strtolower(trim(explode(',', $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')[0])) === 'https'
+        ? 'https' : 'http';
+    $origin = $scheme . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost');
+    $previewUrl = $origin . $roomBase . rawurlencode($roomId);
+    $previewImage = $origin . $roomBase . 'assets/rooms/images/thumb-2.jpg';
+
 
     // 3D editing, handle uploads, placement changes and deletions on this page
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -266,7 +279,20 @@
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-        <title>y9k<?php if ($showRoomNumbers): ?> — <?= htmlspecialchars(strtoupper($roomId), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></title>
+        <title><?= htmlspecialchars('Y9K [' . $roomTitle . ']', ENT_QUOTES, 'UTF-8') ?></title>
+        <meta name="description" content="<?= htmlspecialchars($previewDescription, ENT_QUOTES, 'UTF-8') ?>">
+        <meta property="og:type" content="website">
+        <meta property="og:url" content="<?= htmlspecialchars($previewUrl, ENT_QUOTES, 'UTF-8') ?>">
+        <meta property="og:title" content="<?= htmlspecialchars($previewTitle, ENT_QUOTES, 'UTF-8') ?>">
+        <meta property="og:description" content="<?= htmlspecialchars($previewDescription, ENT_QUOTES, 'UTF-8') ?>">
+        <meta property="og:image" content="<?= htmlspecialchars($previewImage, ENT_QUOTES, 'UTF-8') ?>">
+        <meta property="og:image:width" content="605">
+        <meta property="og:image:height" content="397">
+        <meta property="og:image:alt" content="Gallery and hallway preview">
+        <meta name="twitter:card" content="summary_large_image">
+        <meta name="twitter:title" content="<?= htmlspecialchars($previewTitle, ENT_QUOTES, 'UTF-8') ?>">
+        <meta name="twitter:description" content="<?= htmlspecialchars($previewDescription, ENT_QUOTES, 'UTF-8') ?>">
+        <meta name="twitter:image" content="<?= htmlspecialchars($previewImage, ENT_QUOTES, 'UTF-8') ?>">
         <!-- 3D viewport and fallback navigation styling. -->
         <style>
             /* Artwork upload/edit panel: adjust its appearance here. */
@@ -368,10 +394,57 @@
             #room-image-status:empty {
                 display: none;
             }
+            /* Decorative room overlay; gestures pass through to the canvas. */
+            .room-brand {
+                position: absolute;
+                top: 0;
+                left: 25px;
+                z-index: 1;
+                margin: 1rem 0;
+                width: fit-content;
+                color: #000;
+                /* color: #fff; */
+                font-family: "Times New Roman", serif;
+                font-size: 32px;
+                font-weight: 100;
+                text-shadow: 5px 5px 0 #00000066,
+                    10px 10px 0 #00000033,
+                    15px 15px 0 #00000011;
+                /* text-shadow: 5px 5px 0 #ffffff66,
+                    10px 10px 0 #ffffff33,
+                    15px 15px 0 #ffffff11; */
+                /* background-color: blue; */
+                pointer-events: none;
+                user-select: none;
+                -webkit-user-select: none;
+            }
         </style>
     </head>
     <body>
         <div id="stage">
+            <h1 class="room-brand" aria-label="Y9K" hidden>h̵͔͠t̵̲̓̆ț̶̀͠p̵̯̘̈́s̴̲̙̅͋:̶̮͗̄/̸̰̅/̸̻̻́y̸̢͓͒9̷̳̔ǩ̷̹́.̸̜̀̽x̶͖̅y̵̘̪͂͠z̸͙͚̕/̵̧̽̅</h1>
+            <script>
+                (() => {
+                    const brand = document.querySelector('.room-brand');
+                    const key = 'y9k-brand-shown-at';
+                    const interval = 30 * 60 * 1000;
+                    const now = Date.now();
+                    // Remember the display time across room changes and page reloads.
+                    try {
+                        const last = Number(localStorage.getItem(key));
+                        if (last > 0 && now - last < interval) return;
+                        localStorage.setItem(key, String(now));
+                    } catch {
+                        // Still show the overlay if browser storage is unavailable.
+                    }
+                    brand.hidden = false;
+                    // Hold for three seconds, fade for twelve, then remove it from display.
+                    const fade = brand.animate([{ opacity: 1 }, { opacity: 0 }], {
+                        delay: 3000, duration: 12000, easing: 'ease-in-out', fill: 'forwards',
+                    });
+                    fade.finished.then(() => { brand.hidden = true; });
+                })();
+            </script>
             <!-- Shared room links/details - with 3D controls and image fallback links -->
             <details id="room-navigation">
                 <summary><?php if ($showRoomNumbers): ?>Room <?= htmlspecialchars(strtoupper($roomId), ENT_QUOTES, 'UTF-8') ?> · <?php endif; ?><?= $gallery ? 'gallery' : 'hallway' ?></summary>
