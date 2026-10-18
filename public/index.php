@@ -81,7 +81,7 @@
     $roomInfo = "*NOT AN EXIT\n"
         . 'Exit Sign Facing Spiral Center: ' . ($exitWall ?? 'none') . "\n\n"
         . $roomInfo . "\n*doors do not follow spiral progression\n"
-        . "*system version 1.4\n";
+        . "*system version 1.5\n";
 
 
     // From old index.php - identify the door layout and count its doors
