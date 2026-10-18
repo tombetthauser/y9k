@@ -995,7 +995,7 @@ export class Room {
             await discard();
             file = next;
             filename.textContent = file.name;
-            id = "preview-" + crypto.randomUUID();
+            id = "preview-" + newPlacementId();
             this.addImage({ ...placement(), id, file, name: file.name });
             try { await this.ready; }
             catch (error) { id = file = null; throw error; }
