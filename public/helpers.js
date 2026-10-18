@@ -141,7 +141,13 @@ const installRoomUI = (target) => {
         const style = document.createElement("style");
         style.id = "room-library-styles";
         style.textContent = ROOM_STYLES + `
-            #stage canvas { touch-action: none; }
+            /* Canvas holds edit artwork instead of selecting text or opening mobile menus. */
+            #stage canvas {
+                touch-action: none;
+                user-select: none;
+                -webkit-user-select: none;
+                -webkit-touch-callout: none;
+            }
             #room-editor { display:none; position:absolute; right:12px; top:12px; z-index:12; padding:10px; max-width:240px; max-height:65vh; overflow:auto; background:#fffffff0; color:#111; font:13px sans-serif; }
             body.is-dev-mode #room-editor { display:block; }
             #room-editor label { display:block; margin:5px 0; }
@@ -302,6 +308,8 @@ export class Room {
             onFrame: delta => this.keyboard?.update(delta) ?? false,
         });
         mountedRoom = this;
+        this._addAudioToggle(document.querySelector("#lightbox .lightbox-frame"));
+        this._addAudioToggle(document.querySelector("#video-lightbox .video-lightbox-frame"));
         if (!this.hallway && o.galleryLightFlicker) {
             this.galleryLights = createGalleryLightStartup({ lights: this.app.roomLights });
         }
@@ -311,8 +319,8 @@ export class Room {
         this.app.camera.updateProjectionMatrix();
         const { scene, textureLoader, wallClick, roomLights } = this.app;
         const olderHallway = this.hallway && this.doorCount() < 4;
-        const ceilingColor = o.ceilingColor ?? (this.hallway ? (olderHallway ? 0xb8b8b8 : 0xc6c6c6) : 0xfafafa);
-        const ceilingTexture = o.ceilingTexture === undefined ? (olderHallway ? null : roomAsset("images/static_images/ceiling.jpg")) : o.ceilingTexture;
+        const ceilingColor = o.ceilingColor ?? (this.hallway ? (olderHallway ? 0xc2c2c2 : 0xc9c9c9) : 0xfafafa);
+        const ceilingTexture = o.ceilingTexture === undefined ? roomAsset("images/static_images/ceiling.jpg") : o.ceilingTexture;
         const materials = {
             wall: new THREE.MeshStandardMaterial({ color: o.wallColor, side: THREE.FrontSide, ...o.wallMaterial }),
             floor: new THREE.MeshStandardMaterial({ color: o.floorColor, side: THREE.FrontSide, ...o.floorMaterial }),
@@ -464,6 +472,21 @@ export class Room {
                 emissiveMap: texture, emissiveIntensity: glow }));
     }
 
+    // Every panel shares the same saved audio preference and updates immediately when it changes.
+    _addAudioToggle(panel) {
+        if (!panel || panel.querySelector("[data-room-audio]")) return;
+        const label = document.createElement("label");
+        label.dataset.roomAudio = "";
+        label.innerHTML = '<span class="modal-label">audio</span>: <input type="checkbox" aria-label="audio on/off">';
+        const input = label.querySelector("input");
+        this.app.music.onSoundChange(on => input.checked = on);
+        input.onchange = () => this.app.music.setSoundOn(input.checked);
+        // Keep checkbox taps from closing a lightbox or starting image dragging.
+        for (const type of ["click", "pointerdown", "dblclick"])
+            label.addEventListener(type, event => event.stopPropagation());
+        panel.appendChild(label);
+    }
+
     // Switching room interactions closes the old panel and discards unsaved previews first.
     async _closeModals() {
         if (this.wallEditor?.open) await this.closeWallEditor();
@@ -485,6 +508,7 @@ export class Room {
                 </div><p data-info hidden style="white-space:pre-line"></p><p><a data-url></a></p>
                 <button type="button" data-copy>copy room link</button><p role="status" aria-live="polite"></p>`;
             this.stage.appendChild(panel);
+            this._addAudioToggle(panel);
             panel.querySelector('[name="close"]').onclick = () => panel.close();
             panel.querySelector("[data-copy]").onclick = async () => {
                 const link = panel.querySelector("[data-url]"), status = panel.querySelector("[role=status]");
@@ -879,6 +903,7 @@ export class Room {
         panel.setAttribute("aria-label", "artwork upload and placement");
         this.stage.appendChild(panel);
         this.wallEditor = panel;
+        this._addAudioToggle(panel);
         panel.addEventListener("close", () => this.app.wallClick.hideCrosshair());
         const form = panel.querySelector("form"), fields = form.elements;
         const status = panel.querySelector("[role=status]");
@@ -1029,7 +1054,7 @@ export class Room {
             return hit;
         };
         const blocked = () => busy || this._doorTravelPending;
-        this.app.canvas.addEventListener("dblclick", async event => {
+        const openWallEditor = async event => {
             if (blocked()) return;
             const hit = pick(event);
             if (!hit || !this.app.wallClick.walls.includes(hit.object)) return;
@@ -1044,7 +1069,45 @@ export class Room {
             status.textContent = "";
             updateMarker();
             panel.show();
+        };
+        let lastTouch = -Infinity, touchStart = null, previousTap = null;
+        this.app.canvas.addEventListener("dblclick", event => {
+            // Ignore a browser-generated double-click following our touch handling.
+            if (performance.now() - lastTouch > 700) openWallEditor(event);
         });
+        // Mobile browsers need explicit double-tap recognition; drags and holds do not count.
+        this.app.canvas.addEventListener("pointerdown", event => {
+            if (event.pointerType !== "touch") return;
+            lastTouch = performance.now();
+            if (!event.isPrimary) { touchStart = previousTap = null; return; }
+            touchStart = { id: event.pointerId, x: event.clientX, y: event.clientY, time: lastTouch };
+        });
+        this.app.canvas.addEventListener("pointermove", event => {
+            if (touchStart && event.pointerId === touchStart.id
+                && Math.hypot(event.clientX - touchStart.x, event.clientY - touchStart.y) > 10)
+                touchStart = previousTap = null;
+        });
+        this.app.canvas.addEventListener("pointerup", event => {
+            if (event.pointerType !== "touch") return;
+            const start = touchStart;
+            touchStart = null;
+            lastTouch = performance.now();
+            if (!start || start.id !== event.pointerId || lastTouch - start.time > 300) {
+                previousTap = null;
+                return;
+            }
+            const hit = pick(event);
+            if (!hit || !this.app.wallClick.walls.includes(hit.object)) { previousTap = null; return; }
+            if (previousTap && lastTouch - previousTap.time <= 400
+                && previousTap.wall === hit.object
+                && Math.hypot(event.clientX - previousTap.x, event.clientY - previousTap.y) <= 30) {
+                previousTap = null;
+                openWallEditor(event);
+            } else {
+                previousTap = { time: lastTouch, x: event.clientX, y: event.clientY, wall: hit.object };
+            }
+        });
+        this.app.canvas.addEventListener("pointercancel", () => { touchStart = previousTap = null; });
         // A stationary 1.65-second press edits artwork; dragging still rotates the view.
         let hold = null, origin = null;
         const cancelHold = () => { clearTimeout(hold); hold = origin = null; };
@@ -4434,6 +4497,7 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
         catch (_) { }
     };
     let IS_SOUND_ON = readSoundPref();
+    const soundListeners = new Set();
     let lightsOn = initialLightsOn;
     let musicAudio = null;
     let lightBuzzAudio = null;
@@ -4478,6 +4542,7 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
         syncLightBuzz();
     };
     const syncMusicToggleUi = () => {
+        soundListeners.forEach(listener => listener(IS_SOUND_ON));
         if (!toggleEl)
             return;
         toggleEl.textContent = IS_SOUND_ON ? "🔊" : "🔇";
@@ -4507,8 +4572,8 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
         }
         await Promise.allSettled(pending);
     };
-    const toggleMusic = async () => {
-        IS_SOUND_ON = !IS_SOUND_ON;
+    const setSoundOn = async on => {
+        IS_SOUND_ON = Boolean(on);
         writeSoundPref(IS_SOUND_ON);
         syncMusicToggleUi();
         if (IS_SOUND_ON)
@@ -4518,6 +4583,7 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
             await syncLightBuzz();
         }
     };
+    const toggleMusic = () => setSoundOn(!IS_SOUND_ON);
     if (toggleEl) {
         toggleEl.addEventListener("click", (e) => {
             e.stopPropagation();
@@ -4547,6 +4613,12 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
     return {
         ensureMusicAudio,
         isSoundOn,
+        setSoundOn,
+        onSoundChange(listener) {
+            soundListeners.add(listener);
+            listener(IS_SOUND_ON);
+            return () => soundListeners.delete(listener);
+        },
         toggleMusic,
         playSfx,
         restore,
@@ -4615,6 +4687,9 @@ export const bindOrbitPointer = ({ canvas, camera, clickable, onHit, dragSens = 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     canvas.style.cursor = "grab";
+    // Suppress native long-press selection/menu behavior only on the room canvas.
+    canvas.addEventListener("selectstart", event => event.preventDefault());
+    canvas.addEventListener("contextmenu", event => event.preventDefault());
     canvas.addEventListener("pointerdown", (e) => {
         if (e.button !== 0)
             return;
