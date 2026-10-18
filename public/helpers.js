@@ -325,10 +325,14 @@ export class Room {
             doorUnlockedSound: o.doorUnlockedSound, lightSwitchSound: o.lightSwitchSound, pageSfx: o.pageSfx,
             directionalPosition: o.directionalPosition ?? [2, 5, 3], lightsOn: !this.hallway && o.galleryLightFlicker ? false : o.lightsOn,
             onHit: object => this._hit(object),
-            onFrame: delta => this.keyboard?.update(delta) ?? false,
+            onFrame: delta => {
+                const turning = this.keyboard?.update(delta) ?? false;
+                this._updateCompass();
+                return turning;
+            },
         });
         mountedRoom = this;
-        this._addAudioToggle(document.querySelector("#lightbox .lightbox-frame"));
+        if (this.hallway) this._addCompass();
         this._addAudioToggle(document.querySelector("#video-lightbox .video-lightbox-frame"));
         if (!this.hallway && o.galleryLightFlicker) {
             this.galleryLights = createGalleryLightStartup({ lights: this.app.roomLights });
@@ -468,6 +472,11 @@ export class Room {
         plaque.position.set(0, -sign.geometry.parameters.height / 2 - height / 2 - 0.075,
             sign.geometry.parameters.depth / 2 + 0.002);
         plaque.userData.galleryEntry = { id, url: url.href };
+        // The enter graphic and its plaque open the same destination information.
+        if (this.hallway) {
+            sign.userData.galleryEntry = plaque.userData.galleryEntry;
+            this.app.clickable.push(sign);
+        }
         sign.add(plaque);
         this.app.clickable.push(plaque);
     }
@@ -490,6 +499,28 @@ export class Room {
         return new THREE.Mesh(new THREE.PlaneGeometry(width, width * canvas.height / canvas.width),
             new THREE.MeshStandardMaterial({ map: texture, emissive: 0xffffff,
                 emissiveMap: texture, emissiveIntensity: glow }));
+    }
+
+    // The compass asset contains 32 vertically stacked 16-pixel direction frames.
+    _addCompass() {
+        const compass = document.createElement("div");
+        compass.className = "room-compass";
+        compass.setAttribute("role", "img");
+        compass.setAttribute("aria-label", "Compass: red needle points north");
+        compass.style.backgroundImage = `url("${roomAsset("images/compass.png")}")`;
+        compass.hidden = true;
+        this.stage.appendChild(compass);
+        this.compass = compass;
+    }
+
+    _updateCompass() {
+        if (!this.compass) return;
+        this.compass.hidden = Boolean(this.stage.querySelector(
+            'dialog[open], #lightbox.is-open, #video-lightbox.is-open'
+        ));
+        // Frame 16 points up; positive camera angles turn the north needle clockwise.
+        const frame = ((Math.round(16 + this.app.orbit.getAngle() * 32 / (Math.PI * 2)) % 32) + 32) % 32;
+        this.compass.style.backgroundPosition = `0 ${frame * 100 / 31}%`;
     }
 
     // Every panel shares the same saved audio preference and updates immediately when it changes.

@@ -81,7 +81,7 @@
     $roomInfo = "*NOT AN EXIT\n"
         . 'Exit Sign Facing Spiral Center: ' . ($exitWall ?? 'none') . "\n\n"
         . $roomInfo . "\n*doors do not follow spiral progression\n"
-        . "*system version 1.7\n";
+        . "*system version 1.8\n";
 
 
     // From old index.php - identify the door layout and count its doors
@@ -429,6 +429,26 @@
             }
             #room-image-status:empty {
                 display: none;
+            }
+            /* Display one compass sprite frame at twice its original pixel size. */
+            .room-compass {
+                /* Adjust these three values to resize or reposition the compass. */
+                --compass-size: 32px;
+                --compass-left: 12px;
+                --compass-bottom: 12px;
+
+                position: absolute;
+                left: max(var(--compass-left), env(safe-area-inset-left));
+                bottom: max(var(--compass-bottom), env(safe-area-inset-bottom));
+                width: var(--compass-size);
+                height: var(--compass-size);
+                z-index: 5;
+                opacity: 0.65;
+                background-size: 100% 3200%;
+                background-repeat: no-repeat;
+                image-rendering: pixelated;
+                pointer-events: none;
+                user-select: none;
             }
             /* Decorative room overlay; gestures pass through to the canvas. */
             .room-brand {
