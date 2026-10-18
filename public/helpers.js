@@ -634,7 +634,7 @@ export class Room {
         if (!file)
             throw new Error("addImage needs a URL, File, or Blob in file.");
         wall = roomWall(wall);
-        id = id ?? globalThis.crypto?.randomUUID?.() ?? "art-" + Math.random().toString(36).slice(2);
+        id = id ?? newPlacementId();
         return this._enqueue(async () => {
             if (this.images.has(String(id)))
                 throw new Error("Duplicate image id: " + id);

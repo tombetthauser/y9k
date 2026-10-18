@@ -81,7 +81,7 @@
     $roomInfo = "*NOT AN EXIT\n"
         . 'Exit Sign Facing Spiral Center: ' . ($exitWall ?? 'none') . "\n\n"
         . $roomInfo . "\n*doors do not follow spiral progression\n"
-        . "*system version 1.5\n";
+        . "*system version 1.6\n";
 
 
     // From old index.php - identify the door layout and count its doors
@@ -482,7 +482,11 @@
         </div>
         <script type="module">
             // 3D setup - pass the room data to the reusable room helpers
-            import { createRoom, createRoomStorage, writeStoredViewFacing } from './helpers.js';
+            // A changed helper file gets a fresh URL so mobile browsers cannot reuse stale code.
+            import { createRoom, createRoomStorage, writeStoredViewFacing } from <?= json_encode(
+                './helpers.js?v=' . filemtime(__DIR__ . '/helpers.js'),
+                JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+            ) ?>;
             
             const data = <?= json_encode(
                 ['id' => $roomId, 'gallery' => $gallery, 'doors' => $doors, 'images' => $images, 'exitWall' => $exitWall, 'roomInfo' => $roomInfo],
