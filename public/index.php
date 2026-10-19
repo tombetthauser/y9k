@@ -545,7 +545,9 @@
             ) ?>;
             
             const data = <?= json_encode(
-                ['id' => $roomId, 'gallery' => $gallery, 'doors' => $doors, 'images' => $images, 'exitWall' => $exitWall, 'roomInfo' => $roomInfo],
+                ['id' => $roomId, 'gallery' => $gallery, 'doors' => $doors, 'images' => $images, 'exitWall' => $exitWall, 'roomInfo' => $roomInfo,
+                    // Include all neighbors, even walls without doors, using PHP's precise room arithmetic.
+                    'neighbors' => array_map(static fn(string $dir): string => getNeighborId($roomId, $dir), ['north', 'east', 'south', 'west'])],
                 JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE
             ) ?>;
             
@@ -612,7 +614,14 @@
             });
             const room = createRoom(data, {
                 persistence: storage,
+                rememberLights: true, // Per-browser room lighting and last-visit history.
                 hallwayBrightness: 0.8, // 1 = original lighting; lower values darken hallways only.
+                hallwayLightBoost: 1.5, // Point-light brightness control; galleries remain much brighter.
+                hallwayLightRange: 5, // Point-light reach in scene units; lower values darken distant corners.
+                hallwayAmbientLight: 0.06, // Soft on-state fill; 0 restores point lights only.
+                hallwayLightColor: 0xfff0de, // Warm amber tint for hallway lighting and fixtures.
+                hallwayFixtureBrightness: 0.45, // Ceiling fixture appearance; 1 restores the original glow.
+                hallwayLightFlicker: true, // Use the gallery flicker sequence when hallway lights turn on.
                 showRoomNumbers: <?= json_encode($showRoomNumbers) ?>,
                 distinctGalleryDoors: false, // Set true to restore the lighter gallery-door texture and styling.
             });

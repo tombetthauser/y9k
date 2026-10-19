@@ -6,6 +6,33 @@ export const roomAsset = (path) => {
     return new URL("./index.php?asset=" + encodeURIComponent(path), import.meta.url).href;
 };
 
+// Store only lit rooms; missing entries mean off. Storage failures leave the room usable.
+export const roomLightState = {
+    isOn(id) {
+        try { return localStorage.getItem("y9k-room-light:" + String(id).toLowerCase()) === "1"; }
+        catch { return false; }
+    },
+    setOn(id, on) {
+        try {
+            const key = "y9k-room-light:" + String(id).toLowerCase();
+            if (on) localStorage.setItem(key, "1");
+            else localStorage.removeItem(key);
+        } catch { }
+    },
+    arrival(id, neighbors = []) {
+        let last = null;
+        try { last = JSON.parse(localStorage.getItem("y9k-last-room")); } catch { }
+        const previous = typeof last?.id === "string" ? last.id.toLowerCase() : null;
+        const continuing = previous === String(id).toLowerCase()
+            || neighbors.some(neighbor => String(neighbor).toLowerCase() === previous);
+        return { alreadyOn: this.isOn(id), automatic: !continuing };
+    },
+    visit(id) {
+        try { localStorage.setItem("y9k-last-room", JSON.stringify({ id: String(id).toLowerCase(), timestamp: Date.now() })); }
+        catch { }
+    },
+};
+
 export const createRoom = (data = {}, options = {}) => {
     const doors = Object.fromEntries(Object.entries(data.doors ?? {}).map(([wall, door]) => {
         if (!door || door.exists === false)
@@ -18,7 +45,7 @@ export const createRoom = (data = {}, options = {}) => {
                 label: door.label ?? door.neighborId.toUpperCase(),
             }];
     }));
-    const config = { roomId: data.id ?? "demo", exitWall: data.exitWall, roomInfo: data.roomInfo, doors, ...options };
+    const config = { roomId: data.id ?? "demo", neighbors: data.neighbors ?? [], exitWall: data.exitWall, roomInfo: data.roomInfo, doors, ...options };
     const gallery = data.gallery ?? Object.values(config.doors).filter(door => door && door.exists !== false).length < 2;
     const room = gallery ? new Gallery(config) : new Hallway(config);
     if (gallery)
@@ -206,6 +233,9 @@ export class Room {
         const hallwayBrightness = options.hallwayBrightness ?? 0.8;
         this.options = {
             hallwayBrightness,
+            hallwayLightBoost: 3.5, hallwayLightRange: 5, hallwayAmbientLight: 0.06,
+            hallwayLightColor: 0xfff0de,
+            hallwayFixtureBrightness: 0.45, hallwayLightFlicker: true,
             width: hallway ? 55 / 3 : 20, length: hallway ? 55 / 3 : 20,
             height: hallway ? 6.25 : 10, corridorWidth: 35 / 6,
             doorHeight: hallway ? 64 : 80, artY: -12, artWidth: 32,
@@ -213,7 +243,7 @@ export class Room {
             autoSpin: 0.00035, background: hallway ? 0x111111 : 0xf0f0f0,
             ambientLight: hallway ? 0.05 * hallwayBrightness : 2.7, directionalLight: hallway ? 0.04 * hallwayBrightness : 0.55,
             directionalPosition: hallway ? [1, 3, 2] : [2, 5, 3],
-            lightsOn: true, galleryLightFlicker: true,
+            lightsOn: false, rememberLights: true, galleryLightFlicker: true,
             floorTexture: roomAsset("images/static_images/floor-2.jpg"),
             ceilingTexture: undefined, wallTexture: null,
             wallColor: hallway ? 0xc8c8c8 : 0xfbfbfd, floorColor: 0xa6a6a6, ceilingColor: undefined,
@@ -310,6 +340,7 @@ export class Room {
         if (this.hallway && (this.doorCount() < 2 || this.doorCount() > 4))
             throw new Error("A Hallway needs two to four doors.");
         const o = this.options;
+        const arrival = o.rememberLights ? roomLightState.arrival(o.roomId, o.neighbors) : { alreadyOn: o.lightsOn, automatic: false };
         if (!(o.width > 0 && o.length > 0 && o.height > 0))
             throw new Error("Room dimensions must be positive feet.");
         this.stage = installRoomUI(target);
@@ -320,10 +351,14 @@ export class Room {
             orbitRadius: inchesToWorld(o.orbitRadius), floorY: -height / 2,
             heightFromFloor: inchesToWorld(o.eyeHeight), lookAtHeightFromFloor: inchesToWorld(o.lookAtHeight),
             autoSpin: o.autoSpin, background: o.background, enableLightbox: true, enableVideoLightbox: true,
-            ambientLight: o.ambientLight, directionalLight: o.directionalLight,
+            ambientLight: this.hallway ? o.hallwayAmbientLight : o.ambientLight,
+            directionalLight: this.hallway ? 0 : o.directionalLight,
+            offIntensity: this.hallway ? { ambient: o.ambientLight, directional: o.directionalLight } : undefined,
+            fixtureBrightness: this.hallway ? o.hallwayFixtureBrightness : 1,
+            lightColor: this.hallway ? o.hallwayLightColor : 0xffffff,
             lightboxSfxVolume: o.lightboxSfxVolume, doorLockedSound: o.doorLockedSound,
             doorUnlockedSound: o.doorUnlockedSound, lightSwitchSound: o.lightSwitchSound, pageSfx: o.pageSfx,
-            directionalPosition: o.directionalPosition ?? [2, 5, 3], lightsOn: !this.hallway && o.galleryLightFlicker ? false : o.lightsOn,
+            directionalPosition: o.directionalPosition ?? [2, 5, 3], lightsOn: arrival.alreadyOn,
             onHit: object => this._hit(object),
             onFrame: delta => {
                 const turning = this.keyboard?.update(delta) ?? false;
@@ -334,7 +369,7 @@ export class Room {
         mountedRoom = this;
         if (this.hallway) this._addCompass();
         this._addAudioToggle(document.querySelector("#video-lightbox .video-lightbox-frame"));
-        if (!this.hallway && o.galleryLightFlicker) {
+        if (this.hallway ? o.hallwayLightFlicker : o.galleryLightFlicker) {
             this.galleryLights = createGalleryLightStartup({ lights: this.app.roomLights });
         }
         this.app.camera.fov = o.fov ?? 72;
@@ -380,10 +415,17 @@ export class Room {
         if (o.keyboard)
             this.keyboard = bindRoomKeyboard({ room: this, turnSpeed: o.keyboardTurnSpeed, facingTolerance: o.doorFacingTolerance });
         this.app.startLoop();
-        if (this.galleryLights && o.lightsOn)
-            this.galleryLights.setOn(true);
+        // Saved-on rooms render lit immediately; only new non-adjacent arrivals flicker on.
+        if (!arrival.alreadyOn && arrival.automatic) this._setRoomLights(true);
+        if (o.rememberLights) roomLightState.visit(o.roomId);
         this.ready = Promise.resolve(this);
         return this;
+    }
+
+    _setRoomLights(on) {
+        if (this.galleryLights) this.galleryLights.setOn(on);
+        else this.app.roomLights.setOn(on);
+        if (this.options.rememberLights) roomLightState.setOn(this.options.roomId, on);
     }
 
     _addReferenceGallery() {
@@ -429,19 +471,24 @@ export class Room {
         const a = this._anchor({ wall });
         const add = createAddWallDoor({ ...this.app, ...this.layout, roomHeight: this.layout.height, bounds: this._wallBounds(a) });
         const galleryDoor = spec.destinationIsGallery ?? spec.bright ?? false;
-        const illuminated = galleryDoor && this.options.distinctGalleryDoors;
+        const illuminated = this.hallway ? roomLightState.isOn(spec.neighborId)
+            : galleryDoor && this.options.distinctGalleryDoors;
         const doorHeight = inchesToWorld(spec.height ?? this.options.doorHeight);
-        const file = spec.file ?? roomAsset(illuminated ? "images/door-3.jpg" : "images/door-1.jpg");
+        const litTexture = this.hallway && !galleryDoor ? "images/door-5.jpg" : "images/door-2.jpg";
+        const file = spec.file ?? roomAsset(illuminated ? litTexture : "images/door-1.jpg");
         const span = a.edge.length / 2;
         const fixedAlong = this.hallway ? 0 : span - doorHeight * (264 / 676) / 2 - 0.85;
         const mesh = await add(wall, file, doorHeight, {
             href: spec.href ?? null, locked: spec.locked,
-            bright: this.hallway ? false : illuminated,
+            bright: illuminated,
+            glow: 0.5,
             x: fixedAlong,
             isLabelled: this.options.showRoomNumbers && spec.label != null, label: spec.label ?? null,
             width: spec.width == null ? null : inchesToWorld(spec.width),
         });
         spec.mesh = mesh;
+        if (mesh && this.hallway && illuminated)
+            this.app.roomLights.registerDoorGlow(mesh.material);
         // Gallery entrances get the same raised, softly illuminated housing as exit signs.
         if (mesh && galleryDoor)
             this._factories.addExitSign(mesh, { file: roomAsset("images/enter.png"), right: true, heightRatio: 3 / 4, height: EXIT_DEFAULT_BOX_HEIGHT * 1.25,
@@ -632,10 +679,8 @@ export class Room {
             if (this._doorTravelPending)
                 return;
             if (data.isDisabled === false) {
-                if (this.galleryLights)
-                    this.galleryLights.setOn(!this.galleryLights.isRequestedOn());
-                else
-                    this.app.roomLights.toggle();
+                const on = this.galleryLights ? this.galleryLights.isRequestedOn() : this.app.roomLights.isOn();
+                this._setRoomLights(!on);
             }
             this.app.music.playSfx(this.options.lightSwitchSound ?? DEFAULT_LIGHT_SWITCH_SOUND);
         }
@@ -648,17 +693,7 @@ export class Room {
             else {
                 writeStoredViewFacing(data.wall);
                 this._doorTravelPending = true;
-                const exit = async () => {
-                    if (!this.hallway && data.href) {
-                        const lightsWereOn = this.app.roomLights.isOn();
-                        (this.galleryLights ?? this.app.roomLights).setOn(false);
-                        if (lightsWereOn) {
-                            await this.app.music.playSfx(this.options.lightSwitchSound ?? DEFAULT_LIGHT_SWITCH_SOUND);
-                            await new Promise(resolve => setTimeout(resolve, 120));
-                        }
-                    }
-                    await this.app.music.playSfx(this.app.doorUnlockedSound);
-                };
+                const exit = () => this.app.music.playSfx(this.app.doorUnlockedSound);
                 exit().then(() => {
                     if (data.href)
                         window.location.assign(data.href);
@@ -852,7 +887,7 @@ export class Room {
     }
 
     setLights(on = true) {
-        return this._enqueue(() => (this.galleryLights ?? this.app.roomLights).setOn(on));
+        return this._enqueue(() => this._setRoomLights(on));
     }
 
     addCustom(build) {
@@ -1257,19 +1292,43 @@ const addReferenceHallwayContents = (room) => {
     group.scale.set(feetToWorld(room.options.width) / 11, room.layout.height / 3.75, feetToWorld(room.options.length) / 11);
     group.add(contents);
     room.app.scene.add(group);
-    const context = { scene: contents, textureLoader: room.app.textureLoader, roomHalfY: 3.75 / 2 };
+    const context = { scene: contents, textureLoader: room.app.textureLoader,
+        roomHalfY: 3.75 / 2, roomLights: room.app.roomLights };
     const furnish = room.options.defaultFurnishings;
     const ignore = () => { };
+    const fixturePositions = [];
+    const addFixture = createAddLightFixture(context);
     const builders = {
         addElectricalBox: furnish ? createAddElectricalBox(context) : ignore,
         addFoldingChairs: furnish ? createAddFoldingChairs(context) : ignore,
         addBoxStack: furnish ? createAddBoxStack(context) : ignore,
-        addLightSwitch: furnish ? createAddLightSwitch({ ...context, doorHeight: 3.2, clickable: room.app.clickable }) : ignore,
-        addLightFixture: room.options.defaultFixtures ? createAddLightFixture(context) : ignore,
+        addLightSwitch: furnish ? createAddLightSwitch({ ...context, doorHeight: 3.2, clickable: room.app.clickable, defaultDisabled: false }) : ignore,
+        addLightFixture: room.options.defaultFixtures ? (x, z, ...args) => {
+            fixturePositions.push({ x, z });
+            return addFixture(x, z, ...args);
+        } : ignore,
     };
     const addVents = walls => furnish ? createAddVent({ ...context, walls }) : ignore;
     const recipes = { cross: referenceCrossContents, tee: referenceTeeContents, corner: referenceCornerContents, straight: referenceStraightContents };
     recipes[kind]({ ...builders, addVents });
+    // Spread at most four shadow-free lights among the existing fixture locations.
+    const selected = [];
+    while (fixturePositions.length && selected.length < 4) {
+        let best = 0, farthest = -1;
+        fixturePositions.forEach((p, index) => {
+            const distance = selected.length ? Math.min(...selected.map(q => (p.x - q.x) ** 2 + (p.z - q.z) ** 2)) : 0;
+            if (distance > farthest) { farthest = distance; best = index; }
+        });
+        selected.push(fixturePositions.splice(best, 1)[0]);
+    }
+    for (const { x, z } of selected) {
+        const light = new THREE.PointLight(room.options.hallwayLightColor,
+            room.options.hallwayLightBoost * 0.5, room.options.hallwayLightRange, 2);
+        light.position.set(x, context.roomHalfY - 0.15, z);
+        light.castShadow = false;
+        contents.add(light);
+        room.app.roomLights.registerLight(light);
+    }
     if (furnish) {
         const door = room.doors[room.options.exitWall ?? "north"];
         if (door?.mesh)
@@ -1544,7 +1603,7 @@ export const bindRoomKeyboard = ({ room, target = document, windowTarget = windo
 export const createGalleryLightStartup = ({ lights, schedule = setTimeout, unschedule = clearTimeout } = {}) => {
     const pulses = [[700, true], [25, false], [40, true], [30, false], [45, true], [20, false], [40, true]];
     let timer = null;
-    let requestedOn = false;
+    let requestedOn = lights.isOn();
     let generation = 0;
     return {
         isRequestedOn() { return requestedOn; },
@@ -2856,9 +2915,9 @@ const PLATE_COLOR = 0xf4f4f4;
 const SWITCH_FACE_TINT = 0xffffff;
 const SWITCH_WALL_FLUSH_PULL = 0.05;
 
-export const createAddLightSwitch = ({ scene, textureLoader, roomHalfY, doorHeight = 3.2, clickable = null, }) => {
+export const createAddLightSwitch = ({ scene, textureLoader, roomHalfY, doorHeight = 3.2, clickable = null, defaultDisabled = true, }) => {
     const defaultCenterFromFloor = doorHeight / 2;
-    return (direction, x, y, heightFromFloor = defaultCenterFromFloor, { scale = 1, switches = 2, isDisabled = true } = {}) => {
+    return (direction, x, y, heightFromFloor = defaultCenterFromFloor, { scale = 1, switches = 2, isDisabled = defaultDisabled } = {}) => {
         textureLoader.load(SWITCH_IMAGE, (tex) => {
             const count = Math.max(1, Math.round(Number(switches) || 2));
             const units = count / 2;
@@ -2922,7 +2981,7 @@ const FIXTURE_ON_RGB = [14, 13.2, 11.5];
 
 const FIXTURE_OFF_COLOR = 0x585858;
 
-export const createRoomLights = ({ ambient, directional, scene = null, isOn = true, offIntensity = { ambient: 0.05, directional: 0.04 }, offBackground = 0x111111, onChange = null, } = {}) => {
+export const createRoomLights = ({ ambient, directional, scene = null, isOn = true, offIntensity = { ambient: 0.05, directional: 0.04 }, offBackground = 0x111111, onChange = null, fixtureBrightness = 1, fixtureColor = 0xffffff, } = {}) => {
     const onIntensity = {
         ambient: ambient ? ambient.intensity : 1,
         directional: directional ? directional.intensity : 1,
@@ -2936,12 +2995,14 @@ export const createRoomLights = ({ ambient, directional, scene = null, isOn = tr
         : null;
     let on = !!isOn;
     const fixtures = [];
+    const localLights = [];
+    const doorGlows = [];
     const unlit = [];
     const applyFixtureFace = (face, lit) => {
         if (!face || !face.color)
             return;
         if (lit)
-            face.color.setRGB(...FIXTURE_ON_RGB);
+            face.color.setRGB(...FIXTURE_ON_RGB.map(value => value * fixtureBrightness)).multiply(new THREE.Color(fixtureColor));
         else
             face.color.set(FIXTURE_OFF_COLOR);
     };
@@ -2951,6 +3012,10 @@ export const createRoomLights = ({ ambient, directional, scene = null, isOn = tr
             ambient.intensity = levels.ambient;
         if (directional)
             directional.intensity = levels.directional;
+        for (const { light, intensity } of localLights)
+            light.intensity = on ? intensity : 0;
+        for (const { material, intensity, offMultiplier } of doorGlows)
+            material.emissiveIntensity = intensity * (on ? 1 : offMultiplier);
         for (const { face } of fixtures)
             applyFixtureFace(face, on);
         for (const entry of unlit) {
@@ -2975,6 +3040,17 @@ export const createRoomLights = ({ ambient, directional, scene = null, isOn = tr
             if (typeof onChange === "function")
                 onChange(on);
             return on;
+        },
+        // Keep destination-lit doors visible, but soften their glow in a dark hallway.
+        registerDoorGlow(material, offMultiplier = 0.8) {
+            const intensity = material.emissiveIntensity;
+            doorGlows.push({ material, intensity, offMultiplier });
+            material.emissiveIntensity = intensity * (on ? 1 : offMultiplier);
+        },
+        // Point lights use the same switch and timed flicker as the fixture faces.
+        registerLight(light) {
+            localLights.push({ light, intensity: light.intensity });
+            if (!on) light.intensity = 0;
         },
         registerFixture(faceMat) {
             if (!faceMat)
@@ -3511,7 +3587,7 @@ export const addDoorRoomLabel = ({ scene, wall, doorAlong, doorWidth, doorHeight
 };
 
 export const createAddWallDoor = ({ scene, textureLoader, roomHalfY, roomHeight, clickable, bounds, wallInset = 0.05, }) => {
-    return (wall, imageFile, doorHeight, { href = null, locked = true, bright = false, x = 0, isLabelled = false, label = null, width = null, } = {}) => {
+    return (wall, imageFile, doorHeight, { href = null, locked = true, bright = false, glow = 0.5, x = 0, isLabelled = false, label = null, width = null, } = {}) => {
         return new Promise((resolve, reject) => {
             textureLoader.load(imageFile, (tex) => {
                 tex.colorSpace = THREE.SRGBColorSpace;
@@ -3526,7 +3602,7 @@ export const createAddWallDoor = ({ scene, textureLoader, roomHalfY, roomHeight,
                         color: 0xffffff,
                         emissive: 0xffffff,
                         emissiveMap: tex,
-                        emissiveIntensity: 0.5,
+                        emissiveIntensity: glow,
                         toneMapped: false,
                     })
                     : new THREE.MeshStandardMaterial({ map: tex });
@@ -4853,7 +4929,7 @@ const DEFAULT_DOOR_UNLOCKED_SOUND = roomAsset("music/door-soft-complete.mp3");
 const DEFAULT_LIGHT_SWITCH_SOUND = new URL("./assets/rooms/audio/light-switch.wav", import.meta.url).href;
 const DEFAULT_PAGE_SFX = roomAsset("music/page-3.mp3");
 
-export const createRoomApp = ({ musicPath, musicVolume = 0.25, lightBuzzPath = null, lightBuzzVolume = 0.2, camY = null, orbitRadius = 1.4, lookAtY = null, heightFromFloor = DEFAULT_CAMERA_HEIGHT_FROM_FLOOR, lookAtHeightFromFloor = null, floorY = -DEFAULT_ROOM_HEIGHT / 2, autoSpin = 0.00035, background = 0x111111, enableLightbox = false, enableVideoLightbox = false, lightboxSfxVolume = 1, doorLockedSound = DEFAULT_DOOR_LOCKED_SOUND, doorUnlockedSound = DEFAULT_DOOR_UNLOCKED_SOUND, lightSwitchSound = DEFAULT_LIGHT_SWITCH_SOUND, pageSfx = DEFAULT_PAGE_SFX, ambientLight = 0.05, directionalLight = 0.04, directionalPosition = [1, 3, 2], lightsOn = true, onHit = null, onFrame = null, } = {}) => {
+export const createRoomApp = ({ musicPath, musicVolume = 0.25, lightBuzzPath = null, lightBuzzVolume = 0.2, camY = null, orbitRadius = 1.4, lookAtY = null, heightFromFloor = DEFAULT_CAMERA_HEIGHT_FROM_FLOOR, lookAtHeightFromFloor = null, floorY = -DEFAULT_ROOM_HEIGHT / 2, autoSpin = 0.00035, background = 0x111111, enableLightbox = false, enableVideoLightbox = false, lightboxSfxVolume = 1, doorLockedSound = DEFAULT_DOOR_LOCKED_SOUND, doorUnlockedSound = DEFAULT_DOOR_UNLOCKED_SOUND, lightSwitchSound = DEFAULT_LIGHT_SWITCH_SOUND, pageSfx = DEFAULT_PAGE_SFX, ambientLight = 0.05, directionalLight = 0.04, directionalPosition = [1, 3, 2], lightsOn = true, lightColor = 0xffffff, fixtureBrightness = 1, offIntensity = { ambient: 0.05, directional: 0.04 }, onHit = null, onFrame = null, } = {}) => {
     const resolveCamY = (fromFloor, floor) => camY != null ? camY : floor + fromFloor;
     const resolveLookAtY = (fromFloor, lookFromFloor, floor) => lookAtY != null
         ? lookAtY
@@ -4905,9 +4981,9 @@ export const createRoomApp = ({ musicPath, musicVolume = 0.25, lightBuzzPath = n
     });
     bindWindowedToggle({ syncViewportSize });
     initDevMode({ stage });
-    const ambient = new THREE.AmbientLight(0xffffff, ambientLight);
+    const ambient = new THREE.AmbientLight(lightColor, ambientLight);
     scene.add(ambient);
-    const dir = new THREE.DirectionalLight(0xffffff, directionalLight);
+    const dir = new THREE.DirectionalLight(lightColor, directionalLight);
     dir.position.set(...directionalPosition);
     scene.add(dir);
     const roomLights = createRoomLights({
@@ -4915,7 +4991,9 @@ export const createRoomApp = ({ musicPath, musicVolume = 0.25, lightBuzzPath = n
         directional: dir,
         scene,
         isOn: lightsOn,
-        offIntensity: { ambient: 0.05, directional: 0.04 },
+        offIntensity,
+        fixtureBrightness,
+        fixtureColor: lightColor,
         offBackground: 0x111111,
         onChange: (on) => music.setLightsOn(on),
     });
