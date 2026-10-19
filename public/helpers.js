@@ -1,7 +1,7 @@
 import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
 
 export const roomAsset = (path) => {
-    if (path.startsWith("images/"))
+    if (path.startsWith("images/") || path.startsWith("audio/"))
         return new URL("./assets/rooms/" + path, import.meta.url).href;
     return new URL("./index.php?asset=" + encodeURIComponent(path), import.meta.url).href;
 };
@@ -23,9 +23,9 @@ export const roomLightState = {
         let last = null;
         try { last = JSON.parse(localStorage.getItem("y9k-last-room")); } catch { }
         const previous = typeof last?.id === "string" ? last.id.toLowerCase() : null;
-        const continuing = previous === String(id).toLowerCase()
-            || neighbors.some(neighbor => String(neighbor).toLowerCase() === previous);
-        return { alreadyOn: this.isOn(id), automatic: !continuing };
+        const sameRoom = previous === String(id).toLowerCase();
+        const adjacent = !sameRoom && neighbors.some(neighbor => String(neighbor).toLowerCase() === previous);
+        return { alreadyOn: this.isOn(id), automatic: !(sameRoom || adjacent), adjacent, sameRoom };
     },
     visit(id) {
         try { localStorage.setItem("y9k-last-room", JSON.stringify({ id: String(id).toLowerCase(), timestamp: Date.now() })); }
@@ -45,7 +45,7 @@ export const createRoom = (data = {}, options = {}) => {
                 label: door.label ?? door.neighborId.toUpperCase(),
             }];
     }));
-    const config = { roomId: data.id ?? "demo", neighbors: data.neighbors ?? [], exitWall: data.exitWall, roomInfo: data.roomInfo, doors, ...options };
+    const config = { roomId: data.id ?? "demo", neighbors: data.neighbors ?? [], exitWall: data.exitWall, roomInfo: data.roomInfo, exitNotice: data.exitNotice, doors, ...options };
     const gallery = data.gallery ?? Object.values(config.doors).filter(door => door && door.exists !== false).length < 2;
     const room = gallery ? new Gallery(config) : new Hallway(config);
     if (gallery)
@@ -244,6 +244,12 @@ export class Room {
             ambientLight: hallway ? 0.05 * hallwayBrightness : 2.7, directionalLight: hallway ? 0.04 * hallwayBrightness : 0.55,
             directionalPosition: hallway ? [1, 3, 2] : [2, 5, 3],
             lightsOn: false, rememberLights: true, galleryLightFlicker: true,
+            doorTransition: true, doorTransitionDuration: 2000, doorTransitionZoom: 1.30, doorTransitionFadeStart: 0.45,
+            doorTransitionMode: "smooth", doorTransitionSteps: 4, doorTransitionBob: 0.4,
+            stepSound: roomAsset("audio/step-1-hall.wav?v=2"), stepVolume: 0.4, rotationStepDegrees: 15, rotationStepMinInterval: null,
+            doorOpenSound: roomAsset("audio/door-open-soft.WAV"), doorOpenVolume: 0.85, doorOpenFadeProgress: 0.5,
+            doorCloseSound: roomAsset("audio/door-close-1.mp3"), doorSfxVolume: 0.35,
+            roomEntryTransition: true, roomEntryZoom: 1.6, doorTransitionPan: true, doorTransitionPanSpeed: 45, doorTransitionPanMinDuration: 1200, doorTransitionPanThreshold: 3,
             floorTexture: roomAsset("images/static_images/floor-2.jpg"),
             ceilingTexture: undefined, wallTexture: null,
             wallColor: hallway ? 0xc8c8c8 : 0xfbfbfd, floorColor: 0xa6a6a6, ceilingColor: undefined,
@@ -344,9 +350,18 @@ export class Room {
         if (!(o.width > 0 && o.length > 0 && o.height > 0))
             throw new Error("Room dimensions must be positive feet.");
         this.stage = installRoomUI(target);
+        const animateEntry = o.doorTransition && o.roomEntryTransition && arrival.adjacent;
+        if (animateEntry) {
+            // Cover the room before textures load or its first frame is rendered.
+            this._doorFade = document.createElement("div");
+            this._doorFade.className = "door-transition";
+            this._doorFade.style.opacity = 1;
+            this._doorFade.setAttribute("aria-hidden", "true");
+            this.stage.appendChild(this._doorFade);
+        }
         const height = feetToWorld(o.height);
         this.app = createRoomApp({
-            musicPath: o.music, musicVolume: o.musicVolume,
+            musicPath: o.music, musicVolume: o.musicVolume, musicEntryChance: arrival.sameRoom ? 0 : 0.2,
             lightBuzzPath: o.lightBuzz, lightBuzzVolume: o.lightBuzzVolume,
             orbitRadius: inchesToWorld(o.orbitRadius), floorY: -height / 2,
             heightFromFloor: inchesToWorld(o.eyeHeight), lookAtHeightFromFloor: inchesToWorld(o.lookAtHeight),
@@ -360,13 +375,24 @@ export class Room {
             doorUnlockedSound: o.doorUnlockedSound, lightSwitchSound: o.lightSwitchSound, pageSfx: o.pageSfx,
             directionalPosition: o.directionalPosition ?? [2, 5, 3], lightsOn: arrival.alreadyOn,
             onHit: object => this._hit(object),
+            onRotate: radians => this._onUserRotate(radians),
             onFrame: delta => {
+                if (this._doorTravelPending) {
+                    this.app.orbit.setAngle(this._doorTravelAngle);
+                    this._updateCompass();
+                    return true;
+                }
                 const turning = this.keyboard?.update(delta) ?? false;
                 this._updateCompass();
                 return turning;
             },
         });
+        this.app.music.preloadSfx([o.stepSound, o.doorOpenSound, o.doorCloseSound]);
         mountedRoom = this;
+        // Restore the view if the browser returns to this page from its back/forward cache.
+        window.addEventListener("pageshow", event => {
+            if (event.persisted) this._resetDoorTransition();
+        });
         if (this.hallway) this._addCompass();
         this._addAudioToggle(document.querySelector("#video-lightbox .video-lightbox-frame"));
         if (this.hallway ? o.hallwayLightFlicker : o.galleryLightFlicker) {
@@ -414,6 +440,16 @@ export class Room {
             this.enableWallEditor();
         if (o.keyboard)
             this.keyboard = bindRoomKeyboard({ room: this, turnSpeed: o.keyboardTurnSpeed, facingTolerance: o.doorFacingTolerance });
+        if (animateEntry) {
+            this._doorTravelAngle = this.app.orbit.getAngle();
+            this._doorTravelPending = true;
+            this._runDoorTransition(true).then(() => {
+                this._resetDoorTransition();
+                this._playRoomSound(o.doorCloseSound, o.doorSfxVolume);
+            })
+                .catch(error => { this._resetDoorTransition(); console.error("Room entry transition failed", error); });
+        }
+        if (arrival.adjacent && !animateEntry) this._playRoomSound(o.doorCloseSound, o.doorSfxVolume);
         this.app.startLoop();
         // Saved-on rooms render lit immediately; only new non-adjacent arrivals flicker on.
         if (!arrival.alreadyOn && arrival.automatic) this._setRoomLights(true);
@@ -550,10 +586,14 @@ export class Room {
 
     // The compass asset contains 32 vertically stacked 16-pixel direction frames.
     _addCompass() {
-        const compass = document.createElement("div");
+        const compass = document.createElement("button");
+        compass.type = "button";
         compass.className = "room-compass";
-        compass.setAttribute("role", "img");
-        compass.setAttribute("aria-label", "Compass: red needle points north");
+        compass.setAttribute("aria-label", "Open room information; red compass needle points north");
+        compass.title = "room information";
+        compass.addEventListener("click", () => {
+            if (!this._doorTravelPending) this._openRoomInfo();
+        });
         compass.style.backgroundImage = `url("${roomAsset("images/compass.png")}")`;
         compass.hidden = true;
         this.stage.appendChild(compass);
@@ -570,6 +610,14 @@ export class Room {
         this.compass.style.backgroundPosition = `0 ${frame * 100 / 31}%`;
     }
 
+    // Compass and exit signs share all location details; only exit signs add their notice.
+    _openRoomInfo(exitSign = false) {
+        const shared = this.options.roomInfo ?? "Room " + String(this.options.roomId).toUpperCase();
+        const notice = exitSign && this.options.exitNotice ? this.options.exitNotice + "\n" : "";
+        return this._openGalleryEntry({ id: String(this.options.roomId), url: window.location.href,
+            info: notice + shared });
+    }
+
     // Every panel shares the same saved audio preference and updates immediately when it changes.
     _addAudioToggle(panel) {
         if (!panel || panel.querySelector("[data-room-audio]")) return;
@@ -583,6 +631,32 @@ export class Room {
         for (const type of ["click", "pointerdown", "dblclick"])
             label.addEventListener(type, event => event.stopPropagation());
         panel.appendChild(label);
+        const wind = document.createElement("label");
+        wind.dataset.roomWind = "";
+        wind.innerHTML = ' <span class="modal-label">wind</span>: <input type="checkbox" aria-label="wind on/off">';
+        const windInput = wind.querySelector("input");
+        this.app.music.onWindChange(on => windInput.checked = on);
+        windInput.onchange = () => this.app.music.setWindOn(windInput.checked);
+        for (const type of ["click", "pointerdown", "dblclick"])
+            wind.addEventListener(type, event => event.stopPropagation());
+        panel.appendChild(wind);
+        const buzz = document.createElement("label");
+        buzz.dataset.roomBuzz = "";
+        buzz.innerHTML = ' <span class="modal-label">buzz</span>: <input type="checkbox" aria-label="light buzzing on/off">';
+        const buzzInput = buzz.querySelector("input");
+        this.app.music.onBuzzChange(on => buzzInput.checked = on);
+        buzzInput.onchange = () => this.app.music.setBuzzOn(buzzInput.checked);
+        for (const type of ["click", "pointerdown", "dblclick"])
+            buzz.addEventListener(type, event => event.stopPropagation());
+        panel.appendChild(buzz);
+        const music = document.createElement("label");
+        music.innerHTML = ' <span class="modal-label">music</span>: <input type="checkbox" aria-label="music on/off">';
+        const musicInput = music.querySelector("input");
+        this.app.music.onMusicChange(on => musicInput.checked = on);
+        musicInput.onchange = () => this.app.music.setMusicOn(musicInput.checked);
+        for (const type of ["click", "pointerdown", "dblclick"])
+            music.addEventListener(type, event => event.stopPropagation());
+        panel.appendChild(music);
     }
 
     // Switching room interactions closes the old panel and discards unsaved previews first.
@@ -660,7 +734,142 @@ export class Room {
         if (!this.entryDialog.open) this.entryDialog.show();
     }
 
+    // Manual turns and door-centering pans share angular footsteps; idle auto-spin stays silent.
+    _onUserRotate(radians, transitionPan = false) {
+        const degrees = Number(this.options.rotationStepDegrees);
+        if ((this._doorTravelPending && !transitionPan) || !(degrees > 0) || !this.app.music.isSoundOn()) {
+            this._rotationStepTravel = 0;
+            return;
+        }
+        const interval = degrees * Math.PI / 180;
+        this._rotationStepTravel = (this._rotationStepTravel ?? 0) + Math.abs(radians);
+        if (this._rotationStepTravel >= interval) {
+            // Consume excess angle immediately: skipped footsteps never accumulate in a queue.
+            this._rotationStepTravel %= interval;
+            const walkingInterval = Math.max(1, Number(this.options.doorTransitionDuration) || 2000)
+                / Math.max(1, Math.round(Number(this.options.doorTransitionSteps) || 4));
+            const minimum = Math.max(0, Number(this.options.rotationStepMinInterval ?? walkingInterval) || 0);
+            const now = performance.now();
+            if (now - (this._lastRotationStepAt ?? -Infinity) < minimum) return;
+            this._lastRotationStepAt = now;
+            this._playRoomSound(this.options.stepSound, this.options.stepVolume);
+        }
+    }
+
+    // Sound paths can be replaced or set to null; the shared audio toggle controls playback.
+    _playRoomSound(path, volume) {
+        return path ? this.app.music.playSfx(path, volume) : Promise.resolve();
+    }
+
+    // Rotate along the shortest arc until the clicked door is horizontally centered.
+    _panToDoor(door) {
+        if (!this.options.doorTransition || !this.options.doorTransitionPan) return Promise.resolve();
+        const position = door.getWorldPosition(new THREE.Vector3());
+        const from = this.app.orbit.getAngle();
+        const target = Math.atan2(-position.x, -position.z);
+        const difference = Math.atan2(Math.sin(target - from), Math.cos(target - from));
+        const threshold = Math.max(0, Number(this.options.doorTransitionPanThreshold) || 0);
+        // Skip nearly centered doors without snapping the camera to a new angle.
+        if (Math.abs(difference) * 180 / Math.PI <= threshold) return Promise.resolve();
+        // Constant angular speed: a 10-degree turn finishes much sooner than a 90-degree turn.
+        const speed = Math.max(1, Number(this.options.doorTransitionPanSpeed) || 45);
+        const minimum = Math.max(0, Number(this.options.doorTransitionPanMinDuration) || 0);
+        const duration = Math.max(minimum, Math.abs(difference) * 180 / Math.PI / speed * 1000);
+        const start = performance.now();
+        let previousAngle = from;
+        return new Promise(resolve => {
+            const frame = now => {
+                const progress = Math.min(1, Math.max(0, (now - start) / duration));
+                const eased = progress * progress * (3 - 2 * progress);
+                this._doorTravelAngle = from + difference * eased;
+                this.app.orbit.setAngle(this._doorTravelAngle);
+                this._onUserRotate(this._doorTravelAngle - previousAngle, true);
+                previousAngle = this._doorTravelAngle;
+                if (progress < 1) requestAnimationFrame(frame);
+                else resolve();
+            };
+            requestAnimationFrame(frame);
+        });
+    }
+
+    // Exit zooms in to black; adjacent-room entry starts wider and settles while fading in.
+    _runDoorTransition(entering = false) {
+        if (!this.options.doorTransition) return Promise.resolve();
+        const camera = this.app.camera;
+        const normalFov = camera.fov;
+        this._doorOriginalFov = normalFov;
+        const duration = Math.max(1, Number(this.options.doorTransitionDuration) || 2000);
+        const zoom = Math.max(1, Number(entering ? this.options.roomEntryZoom : this.options.doorTransitionZoom) || 1);
+        const fadeStart = Math.max(0, Math.min(0.99, Number(this.options.doorTransitionFadeStart) || 0));
+        const startFov = entering ? Math.min(160, 2 * Math.atan(Math.tan(normalFov * Math.PI / 360) * zoom) * 180 / Math.PI) : normalFov;
+        const endFov = entering ? normalFov : 2 * Math.atan(Math.tan(normalFov * Math.PI / 360) / zoom) * 180 / Math.PI;
+        const cover = this._doorFade ?? document.createElement("div");
+        cover.className = "door-transition";
+        cover.setAttribute("aria-hidden", "true");
+        cover.style.opacity = entering ? 1 : 0;
+        this.stage.appendChild(cover);
+        this._doorFade = cover;
+        camera.fov = startFov;
+        camera.updateProjectionMatrix();
+        const start = performance.now();
+        const smooth = t => t * t * (3 - 2 * t);
+        const walking = this.options.doorTransitionMode === "walk";
+        const steps = Math.max(1, Math.round(Number(this.options.doorTransitionSteps) || 4));
+        const bob = inchesToWorld(Math.max(0, Number(this.options.doorTransitionBob) || 0));
+        camera.userData.transitionBob = 0;
+        let lastStep = 0;
+        let opening = null;
+        return new Promise((resolve, reject) => {
+            const frame = now => {
+                const progress = Math.min(1, Math.max(0, (now - start) / duration));
+                const stride = progress * steps;
+                const fraction = stride - Math.floor(stride);
+                // One footfall near each stride's midpoint, without bursts after a stalled frame.
+                const footfall = Math.min(steps, Math.floor(stride + 0.5));
+                if (walking && footfall > lastStep) {
+                    lastStep = footfall;
+                    this._playRoomSound(this.options.stepSound, this.options.stepVolume);
+                }
+                // Each stride advances gently, then pauses briefly rather than snapping between frames.
+                const stepped = (Math.floor(stride) + smooth(Math.min(1, fraction / 0.65))) / steps;
+                const zoomProgress = walking ? Math.min(1, stepped) : progress;
+                camera.fov = startFov + (endFov - startFov) * smooth(zoomProgress);
+                camera.userData.transitionBob = walking
+                    ? Math.sin(stride * Math.PI * 2) * bob * Math.sin(progress * Math.PI) : 0;
+                camera.updateProjectionMatrix();
+                cover.style.opacity = entering
+                    ? 1 - smooth(Math.min(1, progress / (1 - fadeStart)))
+                    : smooth(Math.max(0, (progress - fadeStart) / (1 - fadeStart)));
+                // Position the opening sound within the fade-out; footsteps may overlap.
+                const fadeProgress = Math.max(0, Math.min(1, Number(this.options.doorOpenFadeProgress) || 0));
+                const openAt = fadeStart + (1 - fadeStart) * fadeProgress;
+                if (!entering && !opening && progress >= openAt) {
+                    opening = this._playRoomSound(this.options.doorOpenSound, this.options.doorOpenVolume);
+                }
+                if (progress < 1) requestAnimationFrame(frame);
+                else {
+                    camera.userData.transitionBob = 0;
+                    Promise.resolve(opening).then(resolve, reject);
+                }
+            };
+            requestAnimationFrame(frame);
+        });
+    }
+
+    _resetDoorTransition() {
+        this.app.camera.userData.transitionBob = 0;
+        this._doorFade?.remove();
+        this._doorFade = null;
+        if (this._doorOriginalFov != null) {
+            this.app.camera.fov = this._doorOriginalFov;
+            this.app.camera.updateProjectionMatrix();
+            this._doorOriginalFov = null;
+        }
+        this._doorTravelPending = false;
+    }
+
     async _hit(object) {
+        if (this._doorTravelPending) return;
         const data = object.userData;
         // Releasing the press that opened artwork editing must not open its lightbox.
         if (data.imageFile && this._heldArtwork === data.roomImageId) {
@@ -668,8 +877,7 @@ export class Room {
             return;
         }
         if (data.roomInfo) {
-            this._openGalleryEntry({ id: String(this.options.roomId), url: window.location.href,
-                info: this.options.roomInfo ?? "Room " + String(this.options.roomId).toUpperCase() });
+            this._openRoomInfo(true);
             return;
         }
         if (data.galleryEntry) { this._openGalleryEntry(data.galleryEntry); return; }
@@ -692,15 +900,20 @@ export class Room {
             }
             else {
                 writeStoredViewFacing(data.wall);
+                this._doorTravelAngle = this.app.orbit.getAngle();
                 this._doorTravelPending = true;
-                const exit = () => this.app.music.playSfx(this.app.doorUnlockedSound);
-                exit().then(() => {
+                const travel = async () => {
+                    if (data.href) await this._panToDoor(object);
+                    if (data.href && this.options.doorTransition) await this._runDoorTransition();
+                    else await this._playRoomSound(this.options.doorOpenSound, this.options.doorOpenVolume);
+                };
+                travel().then(() => {
                     if (data.href)
                         window.location.assign(data.href);
                     else
-                        this._doorTravelPending = false;
+                        this._resetDoorTransition();
                 }).catch(error => {
-                    this._doorTravelPending = false;
+                    this._resetDoorTransition();
                     console.error("Door travel failed", error);
                 });
             }
@@ -1588,7 +1801,9 @@ export const bindRoomKeyboard = ({ room, target = document, windowTarget = windo
             if (!held.size)
                 return false;
             const direction = Number(held.has("ArrowLeft")) - Number(held.has("ArrowRight"));
-            room.app.orbit.setAngle(room.app.orbit.getAngle() + direction * turnSpeed * Math.PI / 180 * delta);
+            const rotation = direction * turnSpeed * Math.PI / 180 * delta;
+            room.app.orbit.setAngle(room.app.orbit.getAngle() + rotation);
+            room._onUserRotate(rotation);
             return true;
         },
         dispose() {
@@ -4617,7 +4832,7 @@ export const createAddWallVideoScreen = ({ scene, roomHalfY, floorY = -roomHalfY
     };
 };
 
-export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, lightBuzzPath = null, lightBuzzVolume = 0.2, initialLightsOn = true, toggleEl = document.getElementById("music-toggle"), soundPrefKey = SOUND_PREF_KEY, } = {}) => {
+export const createMusicControls = ({ musicPath, volume = 0.25, musicEntryChance = 0.2, sfxVolume = 1, lightBuzzPath = null, lightBuzzVolume = 0.2, initialLightsOn = true, toggleEl = document.getElementById("music-toggle"), soundPrefKey = SOUND_PREF_KEY, } = {}) => {
     const readSoundPref = () => {
         try {
             const v = localStorage.getItem(soundPrefKey);
@@ -4636,11 +4851,49 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
         catch (_) { }
     };
     let IS_SOUND_ON = readSoundPref();
+    const windPrefKey = "y9k-wind-on";
+    let windOn = false;
+    try { windOn = localStorage.getItem(windPrefKey) === "1"; } catch { }
+    const windListeners = new Set();
+    const buzzPrefKey = "y9k-buzz-on";
+    let buzzOn = false;
+    try { buzzOn = localStorage.getItem(buzzPrefKey) === "1"; } catch { }
+    const buzzListeners = new Set();
+    const musicPrefKey = "y9k-music-on";
+    let musicOn = false;
+    try { musicOn = localStorage.getItem(musicPrefKey) === "1"; } catch { }
+    const musicListeners = new Set();
+    let backgroundMusicAudio = null;
     const soundListeners = new Set();
+    let soundGeneration = 0;
     let lightsOn = initialLightsOn;
     let musicAudio = null;
     let lightBuzzAudio = null;
     const audioUnlockers = new Set();
+    let sfxContext = null;
+    const sfxBuffers = new Map();
+    const activeSfx = new Set();
+    const ensureSfxContext = () => {
+        const Context = window.AudioContext || window.webkitAudioContext;
+        if (!sfxContext && Context) sfxContext = new Context();
+        return sfxContext;
+    };
+    const loadSfx = path => {
+        if (!sfxBuffers.has(path)) {
+            const pending = (async () => {
+                const context = ensureSfxContext();
+                if (!context) return null;
+                const response = await fetch(path);
+                if (!response.ok) throw new Error(`Sound request failed: HTTP ${response.status} (${path})`);
+                return context.decodeAudioData(await response.arrayBuffer());
+            })();
+            sfxBuffers.set(path, pending);
+            pending.catch(() => sfxBuffers.delete(path));
+        }
+        return sfxBuffers.get(path);
+    };
+    const preloadSfx = paths => Promise.allSettled(paths.filter(Boolean).map(loadSfx));
+
     const ensureMusicAudio = () => {
         if (musicAudio)
             return musicAudio;
@@ -4649,6 +4902,64 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
         musicAudio.volume = volume;
         return musicAudio;
     };
+    // Room music plays once, with a fresh random quiet interval after every completion.
+    const musicPauseMin = 2 * 60 * 1000;
+    const musicPauseMax = 6 * 60 * 1000;
+    let musicDue = Math.random() < musicEntryChance;
+    let musicTimer = null;
+    let musicStarting = false;
+    let musicPageActive = true;
+    const clearMusicTimer = () => {
+        if (musicTimer !== null) clearTimeout(musicTimer);
+        musicTimer = null;
+    };
+    const scheduleMusic = () => {
+        if (musicTimer !== null || !musicPageActive || !IS_SOUND_ON || !musicOn) return;
+        const delay = musicPauseMin + Math.random() * (musicPauseMax - musicPauseMin);
+        musicTimer = setTimeout(() => {
+            musicTimer = null;
+            musicDue = true;
+            syncBackgroundMusic();
+        }, delay);
+    };
+    const stopBackgroundMusic = () => {
+        clearMusicTimer();
+        backgroundMusicAudio?.pause();
+        musicDue = false;
+    };
+    const syncBackgroundMusic = async () => {
+        if (!musicPageActive || !IS_SOUND_ON || !musicOn) { stopBackgroundMusic(); return; }
+        if (musicStarting || (backgroundMusicAudio && !backgroundMusicAudio.paused)) return;
+        if (!musicDue) { scheduleMusic(); return; }
+        if (!backgroundMusicAudio) {
+            backgroundMusicAudio = new Audio(roomAsset("audio/planetarium.mp3"));
+            backgroundMusicAudio.loop = false;
+            backgroundMusicAudio.volume = 0.25;
+            backgroundMusicAudio.addEventListener("ended", () => {
+                musicDue = false;
+                scheduleMusic();
+            });
+            backgroundMusicAudio.addEventListener("error", () => {
+                musicDue = false;
+                scheduleMusic();
+            });
+        }
+        musicStarting = true;
+        clearMusicTimer();
+        try {
+            backgroundMusicAudio.currentTime = 0;
+            await backgroundMusicAudio.play();
+            if (!musicPageActive || !IS_SOUND_ON || !musicOn) stopBackgroundMusic();
+            else musicDue = false;
+        } catch {
+            // If autoplay is blocked, retry this one play on a later gesture; never queue copies.
+            if (musicPageActive && IS_SOUND_ON && musicOn) musicDue = true;
+        } finally { musicStarting = false; }
+    };
+    window.addEventListener("pagehide", () => { musicPageActive = false; stopBackgroundMusic(); });
+    window.addEventListener("pageshow", event => {
+        if (event.persisted) { musicPageActive = true; syncBackgroundMusic(); }
+    });
     const ensureLightBuzzAudio = () => {
         if (!lightBuzzPath)
             return null;
@@ -4664,10 +4975,10 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
         if (!a)
             return;
         try {
-            if (IS_SOUND_ON && lightsOn) {
+            if (IS_SOUND_ON && buzzOn && lightsOn) {
                 if (a.paused)
                     await a.play();
-                if (!IS_SOUND_ON || !lightsOn)
+                if (!IS_SOUND_ON || !buzzOn || !lightsOn)
                     a.pause();
             }
             else {
@@ -4693,16 +5004,20 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
         if (!IS_SOUND_ON)
             return;
         const startMusic = async () => {
+            if (!windOn) { musicAudio?.pause(); return; }
             const a = ensureMusicAudio();
             try {
                 if (a.paused)
                     await a.play();
-                if (!IS_SOUND_ON)
+                if (!IS_SOUND_ON || !windOn)
                     a.pause();
             }
             catch (_) { }
         };
-        const pending = [startMusic(), syncLightBuzz()];
+        // Resume during the actual gesture, before waiting for any media/network operation.
+        const context = ensureSfxContext();
+        const resume = context?.state === "suspended" ? context.resume() : Promise.resolve();
+        const pending = [resume, startMusic(), syncLightBuzz(), syncBackgroundMusic()];
         for (const unlock of audioUnlockers) {
             try {
                 pending.push(Promise.resolve(unlock()));
@@ -4712,6 +5027,7 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
         await Promise.allSettled(pending);
     };
     const setSoundOn = async on => {
+        if (IS_SOUND_ON !== Boolean(on)) soundGeneration++;
         IS_SOUND_ON = Boolean(on);
         writeSoundPref(IS_SOUND_ON);
         syncMusicToggleUi();
@@ -4719,8 +5035,35 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
             await activateAudio();
         else {
             musicAudio?.pause();
+            stopBackgroundMusic();
+            for (const source of activeSfx) {
+                try { source.stop(); } catch { }
+            }
             await syncLightBuzz();
         }
+    };
+    const setWindOn = async on => {
+        windOn = Boolean(on);
+        try { localStorage.setItem(windPrefKey, windOn ? "1" : "0"); } catch { }
+        windListeners.forEach(listener => listener(windOn));
+        if (!windOn) musicAudio?.pause();
+        else await activateAudio();
+    };
+    const setBuzzOn = async on => {
+        buzzOn = Boolean(on);
+        try { localStorage.setItem(buzzPrefKey, buzzOn ? "1" : "0"); } catch { }
+        buzzListeners.forEach(listener => listener(buzzOn));
+        if (buzzOn) await activateAudio();
+        else await syncLightBuzz();
+    };
+    const setMusicOn = async on => {
+        const enabling = Boolean(on) && !musicOn;
+        musicOn = Boolean(on);
+        if (enabling) { clearMusicTimer(); musicDue = true; }
+        try { localStorage.setItem(musicPrefKey, musicOn ? "1" : "0"); } catch { }
+        musicListeners.forEach(listener => listener(musicOn));
+        if (musicOn) await activateAudio();
+        else await syncBackgroundMusic();
     };
     const toggleMusic = () => setSoundOn(!IS_SOUND_ON);
     if (toggleEl) {
@@ -4733,16 +5076,56 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
         syncMusicToggleUi();
         await activateAudio();
     };
-    const playSfx = (soundPath, vol = sfxVolume) => {
-        if (!IS_SOUND_ON)
-            return Promise.resolve();
-        return new Promise((resolve) => {
-            const a = new Audio(soundPath);
-            a.volume = vol;
-            const done = () => resolve();
-            a.addEventListener("ended", done, { once: true });
-            a.addEventListener("error", done, { once: true });
-            a.play().catch(done);
+    const playSfx = async (soundPath, vol = sfxVolume) => {
+        if (!IS_SOUND_ON || !soundPath) return;
+        const generation = soundGeneration;
+        const requestedAt = performance.now();
+        const current = () => IS_SOUND_ON && generation === soundGeneration
+            && performance.now() - requestedAt <= 200;
+        try {
+            const context = ensureSfxContext();
+            if (context) {
+                // Gestures unlock audio; timed effects must never wait for a future gesture.
+                if (context.state !== "running") return;
+                let timeout;
+                let buffer;
+                try {
+                    buffer = await Promise.race([
+                        loadSfx(soundPath),
+                        new Promise(resolve => { timeout = setTimeout(() => resolve(null), 200); }),
+                    ]);
+                } finally { clearTimeout(timeout); }
+                // Discard stale loads and requests from before any mute/unmute change.
+                if (!current() || !buffer || context.state !== "running") return;
+                if (buffer) {
+                    // Reuse decoded bytes, but give each footfall its own independent playback source.
+                    const source = context.createBufferSource();
+                    const gain = context.createGain();
+                    source.buffer = buffer;
+                    gain.gain.value = Math.max(0, Math.min(1, vol));
+                    source.connect(gain);
+                    gain.connect(context.destination);
+                    return await new Promise(resolve => {
+                        activeSfx.add(source);
+                        source.onended = () => {
+                            activeSfx.delete(source);
+                            source.disconnect();
+                            gain.disconnect();
+                            resolve();
+                        };
+                        source.start();
+                    });
+                }
+            }
+        } catch (error) { console.warn("Sound playback fallback:", soundPath, error); }
+        // Retain ordinary audio playback for browsers without Web Audio support.
+        if (!current()) return;
+        return new Promise(resolve => {
+            const audio = new Audio(soundPath);
+            audio.volume = vol;
+            audio.addEventListener("ended", resolve, { once: true });
+            audio.addEventListener("error", () => { console.warn("Sound could not load:", soundPath); resolve(); }, { once: true });
+            audio.play().catch(error => { console.warn("Sound playback blocked:", soundPath, error); resolve(); });
         });
     };
     restore();
@@ -4753,12 +5136,31 @@ export const createMusicControls = ({ musicPath, volume = 0.25, sfxVolume = 1, l
         ensureMusicAudio,
         isSoundOn,
         setSoundOn,
+        setWindOn,
+        setMusicOn,
+        onMusicChange(listener) {
+            musicListeners.add(listener);
+            listener(musicOn);
+            return () => musicListeners.delete(listener);
+        },
+        setBuzzOn,
+        onBuzzChange(listener) {
+            buzzListeners.add(listener);
+            listener(buzzOn);
+            return () => buzzListeners.delete(listener);
+        },
+        onWindChange(listener) {
+            windListeners.add(listener);
+            listener(windOn);
+            return () => windListeners.delete(listener);
+        },
         onSoundChange(listener) {
             soundListeners.add(listener);
             listener(IS_SOUND_ON);
             return () => soundListeners.delete(listener);
         },
         toggleMusic,
+        preloadSfx,
         playSfx,
         restore,
         syncMusicToggleUi,
@@ -4811,7 +5213,7 @@ export const bindWindowedToggle = ({ syncViewportSize } = {}) => {
     return toggleWindowed;
 };
 
-export const bindOrbitPointer = ({ canvas, camera, clickable, onHit, dragSens = 0.005, dragThreshold = 4, getAngle, setAngle, } = {}) => {
+export const bindOrbitPointer = ({ canvas, camera, clickable, onHit, dragSens = 0.005, dragThreshold = 4, getAngle, setAngle, onRotate = null, } = {}) => {
     let angle = typeof getAngle === "function" ? getAngle() : 0;
     const readAngle = () => typeof getAngle === "function" ? getAngle() : angle;
     const writeAngle = (a) => {
@@ -4855,6 +5257,7 @@ export const bindOrbitPointer = ({ canvas, camera, clickable, onHit, dragSens = 
             didDrag = true;
         lastX = e.clientX;
         writeAngle(readAngle() + dx * dragSens);
+        if (didDrag) onRotate?.(dx * dragSens);
     });
     const endDrag = (e) => {
         if (!dragging)
@@ -4929,7 +5332,7 @@ const DEFAULT_DOOR_UNLOCKED_SOUND = roomAsset("music/door-soft-complete.mp3");
 const DEFAULT_LIGHT_SWITCH_SOUND = new URL("./assets/rooms/audio/light-switch.wav", import.meta.url).href;
 const DEFAULT_PAGE_SFX = roomAsset("music/page-3.mp3");
 
-export const createRoomApp = ({ musicPath, musicVolume = 0.25, lightBuzzPath = null, lightBuzzVolume = 0.2, camY = null, orbitRadius = 1.4, lookAtY = null, heightFromFloor = DEFAULT_CAMERA_HEIGHT_FROM_FLOOR, lookAtHeightFromFloor = null, floorY = -DEFAULT_ROOM_HEIGHT / 2, autoSpin = 0.00035, background = 0x111111, enableLightbox = false, enableVideoLightbox = false, lightboxSfxVolume = 1, doorLockedSound = DEFAULT_DOOR_LOCKED_SOUND, doorUnlockedSound = DEFAULT_DOOR_UNLOCKED_SOUND, lightSwitchSound = DEFAULT_LIGHT_SWITCH_SOUND, pageSfx = DEFAULT_PAGE_SFX, ambientLight = 0.05, directionalLight = 0.04, directionalPosition = [1, 3, 2], lightsOn = true, lightColor = 0xffffff, fixtureBrightness = 1, offIntensity = { ambient: 0.05, directional: 0.04 }, onHit = null, onFrame = null, } = {}) => {
+export const createRoomApp = ({ musicPath, musicVolume = 0.25, musicEntryChance = 0.2, lightBuzzPath = null, lightBuzzVolume = 0.2, camY = null, orbitRadius = 1.4, lookAtY = null, heightFromFloor = DEFAULT_CAMERA_HEIGHT_FROM_FLOOR, lookAtHeightFromFloor = null, floorY = -DEFAULT_ROOM_HEIGHT / 2, autoSpin = 0.00035, background = 0x111111, enableLightbox = false, enableVideoLightbox = false, lightboxSfxVolume = 1, doorLockedSound = DEFAULT_DOOR_LOCKED_SOUND, doorUnlockedSound = DEFAULT_DOOR_UNLOCKED_SOUND, lightSwitchSound = DEFAULT_LIGHT_SWITCH_SOUND, pageSfx = DEFAULT_PAGE_SFX, ambientLight = 0.05, directionalLight = 0.04, directionalPosition = [1, 3, 2], lightsOn = true, lightColor = 0xffffff, fixtureBrightness = 1, offIntensity = { ambient: 0.05, directional: 0.04 }, onHit = null, onFrame = null, onRotate = null, } = {}) => {
     const resolveCamY = (fromFloor, floor) => camY != null ? camY : floor + fromFloor;
     const resolveLookAtY = (fromFloor, lookFromFloor, floor) => lookAtY != null
         ? lookAtY
@@ -4947,6 +5350,7 @@ export const createRoomApp = ({ musicPath, musicVolume = 0.25, lightBuzzPath = n
     const music = createMusicControls({
         musicPath,
         volume: musicVolume,
+        musicEntryChance,
         lightBuzzPath,
         lightBuzzVolume,
         initialLightsOn: lightsOn,
@@ -5038,6 +5442,7 @@ export const createRoomApp = ({ musicPath, musicVolume = 0.25, lightBuzzPath = n
         camera,
         clickable,
         onHit: typeof onHit === "function" ? onHit : defaultOnHit,
+        onRotate,
         getAngle: () => angle,
         setAngle: (a) => {
             angle = a;
@@ -5063,9 +5468,10 @@ export const createRoomApp = ({ musicPath, musicVolume = 0.25, lightBuzzPath = n
             if (!orbit.isDragging() && !keyboardActive)
                 angle += autoSpin;
             camera.position.x = Math.sin(angle) * orbitRadius;
-            camera.position.y = resolvedCamY;
+            const bob = camera.userData.transitionBob ?? 0;
+            camera.position.y = resolvedCamY + bob;
             camera.position.z = Math.cos(angle) * orbitRadius;
-            camera.lookAt(0, resolvedLookAtY, 0);
+            camera.lookAt(0, resolvedLookAtY + bob, 0);
             renderer.render(scene, camera);
             requestAnimationFrame(loop);
         };

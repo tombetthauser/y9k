@@ -78,10 +78,11 @@
     $roomInfo = 'Number in Spiral Progression (base-10): ' . formatInt($details['base10']) . "\n"
     . "Number in Spiral Progression (base-36): " . strtoupper($roomId) . "\n"
     . 'Length of Spiral Progression: ' . $progressionDistance . "\n" . $roomInfo . "\n";
-    $roomInfo = "*NOT AN EXIT\n"
-        . 'Exit Sign Facing Spiral Center: ' . ($exitWall ?? 'none') . "\n\n"
-        . $roomInfo . "\n*doors do not follow spiral progression\n"
-        . "*system version 1.8\n";
+    // These lines appear only when opening details from an exit sign.
+    $exitNotice = "*NOT AN EXIT\n"
+        . 'Exit Sign Facing Spiral Center: ' . ($exitWall ?? 'none') . "\n";
+    $roomInfo = $roomInfo . "\n*doors do not follow spiral progression\n"
+        . "*system version 1.9\n";
 
 
     // From old index.php - identify the door layout and count its doors
@@ -430,6 +431,16 @@
             #room-image-status:empty {
                 display: none;
             }
+            /* Black cover used during optional door zoom transitions. */
+            .door-transition {
+                position: absolute;
+                inset: 0;
+                z-index: 10000;
+                background: black;
+                opacity: 0;
+                pointer-events: auto;
+                touch-action: none;
+            }
             /* Display one compass sprite frame at twice its original pixel size. */
             .room-compass {
                 /* Adjust these three values to resize or reposition the compass. */
@@ -442,12 +453,16 @@
                 bottom: max(var(--compass-bottom), env(safe-area-inset-bottom));
                 width: var(--compass-size);
                 height: var(--compass-size);
-                z-index: 5;
+                z-index: 10001; /* Stay visible above the transition fade. */
                 opacity: 0.65;
                 background-size: 100% 3200%;
                 background-repeat: no-repeat;
                 image-rendering: pixelated;
-                pointer-events: none;
+                padding: 0;
+                border: 0;
+                background-color: transparent;
+                cursor: pointer;
+                pointer-events: auto;
                 user-select: none;
             }
             /* Decorative room overlay; gestures pass through to the canvas. */
@@ -539,13 +554,13 @@
         <script type="module">
             // 3D setup - pass the room data to the reusable room helpers
             // A changed helper file gets a fresh URL so mobile browsers cannot reuse stale code.
-            import { createRoom, createRoomStorage, writeStoredViewFacing } from <?= json_encode(
+            import { createRoom, createRoomStorage, writeStoredViewFacing, roomAsset } from <?= json_encode(
                 './helpers.js?v=' . filemtime(__DIR__ . '/helpers.js'),
                 JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
             ) ?>;
             
             const data = <?= json_encode(
-                ['id' => $roomId, 'gallery' => $gallery, 'doors' => $doors, 'images' => $images, 'exitWall' => $exitWall, 'roomInfo' => $roomInfo,
+                ['id' => $roomId, 'gallery' => $gallery, 'doors' => $doors, 'images' => $images, 'exitWall' => $exitWall, 'roomInfo' => $roomInfo, 'exitNotice' => $exitNotice,
                     // Include all neighbors, even walls without doors, using PHP's precise room arithmetic.
                     'neighbors' => array_map(static fn(string $dir): string => getNeighborId($roomId, $dir), ['north', 'east', 'south', 'west'])],
                 JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE
@@ -615,6 +630,28 @@
             const room = createRoom(data, {
                 persistence: storage,
                 rememberLights: true, // Per-browser room lighting and last-visit history.
+                stepSound: roomAsset('audio/step-1-hall.wav?v=2'), // Step sound file inside public/assets/rooms/audio/; null disables it.
+                stepVolume: 0.8, // Footstep volume from 0 (silent) to 1 (full volume).
+                rotationStepDegrees: 15, // Play a footstep per this many degrees turned; 0 disables rotation steps.
+                rotationStepMinInterval: null, // null caps rotation steps to the walking cadence; or set milliseconds.
+                doorOpenSound: roomAsset('audio/door-open-soft.WAV'), // Plays halfway through the exit fade, overlapping footsteps.
+                doorOpenVolume: 0.85, // Opening sound volume (0–1); independent of the closing sound.
+                doorOpenFadeProgress: 0.5, // Position within the fade-out: 0 = start, 0.5 = halfway, 1 = end.
+                doorCloseSound: roomAsset('audio/door-close-1.mp3'), // Plays after arriving from an adjacent room.
+                doorSfxVolume: 0.35,
+                doorTransition: true, // Set false to restore immediate door travel after its sound.
+                doorTransitionMode: 'walk', // 'smooth' restores the previous zoom; 'walk' adds walking steps.
+                doorTransitionSteps: 4, // Number of strides during each exit/arrival zoom.
+                doorTransitionBob: 0.4, // Vertical bob in inches; set 0 to disable bobbing.
+                roomEntryTransition: true, // Fade/zoom in only after moving from a different adjacent room.
+                doorTransitionDuration: 2000, // Zoom/fade time in milliseconds.
+                doorTransitionPan: true, // Center the clicked door before starting the zoom/fade.
+                doorTransitionPanSpeed: 25, // Degrees per second; smaller turns take less time. Lower is slower.
+                doorTransitionPanMinDuration: 1200, // Minimum pan time in milliseconds, keeping short turns gentle.
+                doorTransitionPanThreshold: 3, // Skip panning when the door is within this many degrees of center.
+                doorTransitionZoom: 1.30, // Magnification: 1 disables zoom; 1.30 is a 30% zoom.
+                roomEntryZoom: 1.6, // Wider arrival view; higher starts more zoomed out. 1 disables entry zoom.
+                doorTransitionFadeStart: 0.45, // Begin fading 45% through the transition; 0 fades immediately.
                 hallwayBrightness: 0.8, // 1 = original lighting; lower values darken hallways only.
                 hallwayLightBoost: 1.5, // Point-light brightness control; galleries remain much brighter.
                 hallwayLightRange: 5, // Point-light reach in scene units; lower values darken distant corners.
