@@ -53,6 +53,7 @@
     $doors = getRoomDoors($roomId, database());
     $details = spiralDetails($roomId);
     $place = spiralFeet($roomId);
+
     // Pick the available doorway whose neighboring room is nearest the spiral center.
     $exitWall = null;
     $exitDistance = null;
@@ -65,6 +66,7 @@
             $exitDistance = $distance;
         }
     }
+
     // Each step along the numbered spiral represents one 12-foot room.
     $progressionFeet = gmp_mul($details['base10'], 12);
     $progressionDistance = lengthPhrase($progressionFeet);
@@ -76,14 +78,14 @@
             . ' (' . formatInt($details['width']) . ' rooms).' . "\n"
             . 'Standard Room Size: 12x12 feet';
     $roomInfo = 'Number in Spiral Progression (base-10): ' . formatInt($details['base10']) . "\n"
-    . "Number in Spiral Progression (base-36): " . strtoupper($roomId) . "\n"
-    . 'Length of Spiral Progression: ' . $progressionDistance . "\n" . $roomInfo . "\n";
+        . "Number in Spiral Progression (base-36): " . strtoupper($roomId) . "\n"
+        . 'Length of Spiral Progression: ' . $progressionDistance . "\n" . $roomInfo . "\n";
+
     // These lines appear only when opening details from an exit sign.
     $exitNotice = "*NOT AN EXIT\n"
         . 'Exit Sign Facing Spiral Center: ' . ($exitWall ?? 'none') . "\n";
     $roomInfo = $roomInfo . "\n*doors do not follow spiral progression\n"
         . "*system version 1.9\n";
-
 
     // From old index.php - identify the door layout and count its doors
     $key = ($doors['north']['exists'] ? 'd' : '-')
@@ -94,14 +96,17 @@
     $doorsCount = substr_count($key, 'd');
     $gallery = $doorsCount < 2;
     $showRoomNumbers = false; // Set true to restore room IDs in the page and on doors.
+
     // Room navigation uses clean URLs; form submissions still use the PHP endpoint.
     $roomBase = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/index.php')), '/') . '/';
     $url = 'index.php?room=' . rawurlencode($roomId);
+
     // Render sharing metadata on the server so SMS previews do not need JavaScript.
     $roomTitle = ($gallery ? 'Gallery ' : 'Room ') . strtoupper($roomId);
     $zalgoTitle = 'ḧ̴̜̙̏̈́́͋́́͆͝t̵̛̪͇̺̰͕̱̑̀̀͗̏̍t̷͔͋̕p̵̼͗͗ş̶̮̝̻̝͎̉̔̽͆͂̿͒̕ͅͅ:̴̖̟͆̒̾͑̋́̽̀͛͐/̵͕̲͇̳͗̐̽̊͌̈́͆̕͠/̴̧̪̙͑̑̽͘y̸̛̫̬̩̙̝̞̳̬̋̅̆̄̓̊̏͌͠9̸̨̥̣̥͉̜̖̗̩̺̓̀́̃͌̋͘͘͠k̸̡͔̟̜͕͇͋̂̉̓̌̃͌͂̕.̸̡̗̝̤͈̺̽̆͆̋̄͛͒̔x̸̢̛͔̦̼͍̲͇̮̤͙̔̾̌̍͑̃͗͝y̴̢̪͉͎̲͎̽͛͋̉̑̂͜z̴̼̈̈́/̸̡̥͉̅̀̽̏̈̋̇͋̚͝';
     $previewTitle = '[' . $roomTitle . '] ' . $zalgoTitle;
     $previewDescription = 'A̵̩͍̩̺͗̒̎͝ͅͅn̷̠̙̻̥̻͈͙̅͗͛̎ͅ ̵̥̭͈͓̮̼͎̄͂́͛̐̇̾͝ī̵̡̬̱͕̞̦̈́́̇͋̊͊̆̿̚n̵̼̳̻͍̏̀͐f̴̙̰̀́̾̾͛̓̀̓̿ĩ̷̧̳̯͕̗̪͖̰͜n̵̛͇̥̻̉̇̒̑͛̕i̶̢̧̦̲͖̫͙̐̊͌́̅̕t̸̜͇̄̍̑͑̍ͅe̴̮͌̌ ̸̡̱͙̜̭͍̓̋̈̔͊͝g̸͎̤̩̯̺̈́̋r̴͖̐̔͐̽̾į̵̫̦̟͚̗̺̖̩̄̈͆̋̉̂̇͊ḑ̴̢̥̜̥̘̼̼̓̏̓̽̓̋ ̶̹̖͙̃o̷̧̙̍̄͗͗͐̆̑̾̈͘f̶̗̌̑̒̓̆̑̈́̽̐͘ ̸̛̤̹̯̖̬͙̦͂͗̀́̒̿̈́́r̵̞͉̠̳͎̣̫̲̟͝ͅo̸̢͎̜̼̝̦̠͎͖̾͜ȯ̷̧̰͉̫͖̩̼̙̦͌̾͊̀m̷̢̢͈̱̭͌̂͗́͌͐͗͆ś̸͙͖̰̲̲̒̌̔͛.̴̡̙̤̥͔̱͙̏̆͌̃̅̌̍̽';
+
     // Respect HTTPS forwarded by the deployment's reverse proxy as well as direct HTTPS.
     $scheme = (($_SERVER['HTTPS'] ?? '') !== '' && ($_SERVER['HTTPS'] ?? '') !== 'off')
         || strtolower(trim(explode(',', $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')[0])) === 'https'
@@ -110,11 +115,11 @@
     $previewUrl = $origin . $roomBase . rawurlencode($roomId);
     $previewImage = $origin . $roomBase . 'assets/rooms/images/thumb-2.jpg';
 
-
     // 3D editing, handle uploads, placement changes and deletions on this page
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $action = (string) ($_POST['action'] ?? '');
         $res = ['ok' => true];
+
         // Diagnostics describe the request without exposing server paths or stack traces.
         $upload = $_FILES['image'] ?? null;
         $diagnostics = [
@@ -138,6 +143,7 @@
             if ($postLimitBytes > 0 && (float) ($_SERVER['CONTENT_LENGTH'] ?? 0) > $postLimitBytes) {
                 throw new RuntimeException('The request exceeds the server post_max_size limit.');
             }
+
             // Placement metadata uses the same cm fields as the text interface
             if ($action === 'upload' || $action === 'move') {
                 if (!$gallery) throw new RuntimeException('Artwork can only be added or moved in galleries.');
@@ -176,7 +182,7 @@
                     };
                     throw new RuntimeException($reason);
                 }
-                
+
                 $tmp = $upload['tmp_name'];
                 $mime = (new finfo(FILEINFO_MIME_TYPE))->file($tmp);
                 $exts = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp'];
@@ -196,22 +202,22 @@
                 if (!is_dir($dir) && !mkdir($dir, 0755, true) && !is_dir($dir)) {
                     throw new RuntimeException('Could not create image directory.');
                 }
-                
+
                 $key = bin2hex(random_bytes(16)) . '.foo';
                 $path = imageStoragePath($key);
                 $bytes = file_get_contents($tmp);
-                
+
                 if ($bytes === false) {
                     throw new RuntimeException('Could not read uploaded image.');
                 }
-                
+
                 $stored = scrambleImageBytes($bytes, $roomId);
 
                 try {
                     if (file_put_contents($path, $stored, LOCK_EX) !== strlen($stored)) {
                         throw new RuntimeException('Could not store image.');
                     }
-                            
+
                     $statement = database()->prepare('INSERT INTO things (filename, filekey, room, wall, x, y, width) VALUES (:filename, :filekey, :room, :wall, :x, :y, :width)');
                     $args = ['filename' => scrambleMetadata($name, $roomId), 'filekey' => $key, 'room' => hashRoomId($roomId)];
                     $statement->execute($args + $meta);
@@ -241,9 +247,9 @@
                 if ($image === false) {
                     throw new RuntimeException('Image not found in this room.');
                 }
-                
+
                 $name = restoreMetadata($image['filename'], $roomId);
-                
+
                 if ($action === 'move') {
                     $statement = database()->prepare('UPDATE things SET wall = :wall, x = :x, y = :y, width = :width WHERE id = :id AND room = :room');
                     $args = $where;
@@ -252,14 +258,14 @@
                     logChange('ROOM: ' . $roomId . ' | MOVED: ' . $name);
                 } else {
                     $path = imageStoragePath($image['filekey']);
-                    
+
                     if (is_file($path) && !unlink($path)) {
                         throw new RuntimeException('Could not remove image file.');
                     }
-                    
+
                     $statement = database()->prepare('DELETE FROM things WHERE id = :id AND room = :room');
                     $statement->execute($where);
-                    
+
                     logChange('ROOM: ' . $roomId . ' | DELETED: ' . $name);
                 }
             } else {
@@ -558,14 +564,22 @@
                 './helpers.js?v=' . filemtime(__DIR__ . '/helpers.js'),
                 JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
             ) ?>;
-            
+
             const data = <?= json_encode(
-                ['id' => $roomId, 'gallery' => $gallery, 'doors' => $doors, 'images' => $images, 'exitWall' => $exitWall, 'roomInfo' => $roomInfo, 'exitNotice' => $exitNotice,
+                [
+                    'id' => $roomId,
+                    'gallery' => $gallery,
+                    'doors' => $doors,
+                    'images' => $images,
+                    'exitWall' => $exitWall,
+                    'roomInfo' => $roomInfo,
+                    'exitNotice' => $exitNotice,
                     // Include all neighbors, even walls without doors, using PHP's precise room arithmetic.
-                    'neighbors' => array_map(static fn(string $dir): string => getNeighborId($roomId, $dir), ['north', 'east', 'south', 'west'])],
+                    'neighbors' => array_map(static fn(string $dir): string => getNeighborId($roomId, $dir), ['north', 'east', 'south', 'west'])
+                ],
                 JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE
             ) ?>;
-            
+
             const list = document.getElementById('room-images');
             const status = document.getElementById('room-image-status');
             const url = 'index.php?room=' + encodeURIComponent(data.id);
@@ -630,7 +644,62 @@
             const room = createRoom(data, {
                 persistence: storage,
                 rememberLights: true, // Per-browser room lighting and last-visit history.
-                stepSound: roomAsset('audio/step-1-hall.wav?v=2'), // Step sound file inside public/assets/rooms/audio/; null disables it.
+                gallerySkylight: true, // Enable skylights; false restores solid ceilings in every gallery.
+                skylightChance: 65, // Percentage of galleries with skylights: 0–100; stable for each room ID.
+                skylightSeed: 'y9k-skylights-v5', // Change this to reshuffle which galleries have skylights.
+                skylightWidth: 12, // Square opening width in feet; large enough to see from the fixed POV.
+                skylightThickness: 6, // Ceiling depth / vertical reveal in inches.
+                skylightLip: true, // Add trim around the bottom edge of the opening; false removes it.
+                skylightLipWidth: 1.5, // Trim width in inches, extending outward over the ceiling.
+                skylightLipThickness: 0.5, // Trim projects below the ceiling by this many inches.
+                skylightLipColor: 0xffffff, // White trim around the opening.
+                skylightEdgeColor: 0x666666, // Inside vertical corners with lights on.
+                skylightOffEdgeColor: 0x555555, // Inside vertical corners with lights off.
+                skylightLipEdgeColor: 0xd8d8d8, // Subtle lip outlines with lights on.
+                skylightLipOffEdgeColor: 0xc8c8c8, // Subtle lip outlines with lights off.
+                skylightDaylight: true, // Add daylight only while electric lights are off.
+                skylightLightIntensity: 0.35, // Even off-state daylight; lower makes point-light falloff more apparent.
+                skylightLightColor: 0xddeaff, // Soft blue-white daylight.
+
+                // Gallery lighting: additional fills apply only while electric lights are off.
+                galleryFillIntensity: 68, // Center point-light intensity while electric lights are off; 0 disables it.
+                galleryFillColor: 0xfff7ed,
+                galleryFillX: 0, // Inches east/west of the room center.
+                galleryFillZ: 0, // Inches north/south of the room center.
+                galleryFillHeight: 60, // Inches above the floor.
+                galleryFillRange: 24, // Maximum reach in feet; 0 means unlimited.
+                galleryFillDecay: 2, // Distance falloff; higher creates a more localized pool of light.
+                ...(data.gallery ? {
+                    ambientLight: 2.7, // Electric ambient intensity while on.
+                    directionalLight: 0.55, // Electric directional intensity while on.
+                } : {}),
+                galleryOffAmbientLight: 0.05, // Electric-light fallback while switched off.
+                galleryOffDirectionalLight: 0.04,
+                galleryFixtureBrightness: 1, // Glow of powered gallery fixture faces.
+                galleryFixtureOffColor: 0xffffff, // Bright unpowered diffuser surface.
+                galleryFixtureOffGlow: 0.9, // Gentle diffuser brightness only when electric lights are off.
+                galleryEdgeColor: 0xc4c4c8, // Edge lines with electric lights on; darker colors make stronger lines.
+                galleryOffEdgeColor: 0x757575, // Edge lines with electric lights off; 0x000000 = black, 0xffffff = white.
+
+                skylightWind: roomAsset('audio/birds.mp3'), // The wind checkbox uses this track only in skylight rooms.
+                temporaryVolumeSliders: true, // Temporary live volume controls in room modals; false hides them.
+                // Audio volumes: 0 is silent; 1 is full volume. Saved checkboxes still control playback.
+                windVolume: 0.25, // Regular wind in rooms without a skylight.
+                skylightWindVolume: 0.12, // Combined birds/wind track in skylight galleries.
+                backgroundMusicVolume: 0.45, // Planetarium music.
+                lightBuzzVolume: 0.07, // Electric light humming.
+                lightSwitchVolume: 0.22, // Light switch clicks.
+                lightboxSfxVolume: 0.17, // Artwork opening / page sound.
+                doorLockedVolume: 1, // Locked door sound, if used.
+                doorUnlockedVolume: 1, // Legacy door sound, if used.
+
+                skylightTreeLift: 82, // Raise the trees by this many inches to show more through the opening.
+                skylightTreeWidth: 32, // Tree enclosure width in feet; null scales with gallery width.
+                skylightTreeHeight: 15, // Tree enclosure height in feet; null scales with gallery height.
+                skylightTreeDepth: 36, // Tree enclosure depth in feet; null scales with gallery length.
+                skylightTreeRepeatX: 1, // Horizontal texture repeats on each enclosure wall.
+                skylightTreeRepeatY: 2, // Vertical texture repeats; lower values make the trees taller.
+                stepSound: roomAsset('audio/step-1-hall.wav?v=3'), // Step sound file inside public/assets/rooms/audio/; null disables it.
                 stepVolume: 0.8, // Footstep volume from 0 (silent) to 1 (full volume).
                 rotationStepDegrees: 15, // Play a footstep per this many degrees turned; 0 disables rotation steps.
                 rotationStepMinInterval: null, // null caps rotation steps to the walking cadence; or set milliseconds.
@@ -638,7 +707,7 @@
                 doorOpenVolume: 0.85, // Opening sound volume (0–1); independent of the closing sound.
                 doorOpenFadeProgress: 0.5, // Position within the fade-out: 0 = start, 0.5 = halfway, 1 = end.
                 doorCloseSound: roomAsset('audio/door-close-1.mp3'), // Plays after arriving from an adjacent room.
-                doorSfxVolume: 0.35,
+                doorSfxVolume: 0.35, // Door closing volume; opening and footsteps have their own controls above.
                 doorTransition: true, // Set false to restore immediate door travel after its sound.
                 doorTransitionMode: 'walk', // 'smooth' restores the previous zoom; 'walk' adds walking steps.
                 doorTransitionSteps: 4, // Number of strides during each exit/arrival zoom.
@@ -702,7 +771,7 @@
                     try {
                         const id = form.dataset.deleteImage;
                         // Finish any pending texture load so a just-deleted upload cannot appear afterward.
-                        await room.ready.catch(() => {});
+                        await room.ready.catch(() => { });
                         // Hallway/unplaced images have links but may not have a mesh to remove.
                         if (room.images.has(id)) await room.deleteImage(id);
                         else await storage.delete({ id });
@@ -721,6 +790,6 @@
 
                 console.error(error);
             }
-        </script>
+</script>
     </body>
 </html>
