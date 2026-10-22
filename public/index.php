@@ -95,6 +95,24 @@
 
     $doorsCount = substr_count($key, 'd');
     $gallery = $doorsCount < 2;
+
+    // Temporary room-to-computer assignments. Add another room ID and document URL here.
+    // Placement and lighting stay fixed in computer.js; database tracking can replace this map later.
+    $roomComputers = [
+        '0' => [
+            'documentUrl' => 'https://docs.google.com/document/d/e/2PACX-1vS-NhUvNixeN_CbjA1c63Ukkwsz79cPiG48FbtImX9ZHTSywKDDJErJOwXP-vY_BJdD674UGCR4zHfs/pub?embedded=true',
+        ],
+    ];
+    $computer = $roomComputers[$roomId] ?? null;
+    if ($computer !== null) {
+        // Refresh the component, styles, and media together when any of them changes.
+        $computer['assetVersion'] = max(array_map('filemtime', array_merge(
+            [__DIR__ . '/computer.js', __DIR__ . '/computer.css', __DIR__ . '/computer-shadow.js'],
+            glob(__DIR__ . '/assets/rooms/models/computer-*.png'),
+            glob(__DIR__ . '/assets/rooms/audio/computer-*.wav')
+        )));
+    }
+
     $showRoomNumbers = false; // Set true to restore room IDs in the page and on doors.
 
     // Room navigation uses clean URLs; form submissions still use the PHP endpoint.
@@ -560,7 +578,7 @@
         <script type="module">
             // 3D setup - pass the room data to the reusable room helpers
             // A changed helper file gets a fresh URL so mobile browsers cannot reuse stale code.
-            import { createRoom, createRoomStorage, writeStoredViewFacing, roomAsset } from <?= json_encode(
+            import { createRoom, createRoomStorage, writeStoredViewFacing, roomAsset, addComputer } from <?= json_encode(
                 './helpers.js?v=' . filemtime(__DIR__ . '/helpers.js'),
                 JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
             ) ?>;
@@ -568,6 +586,7 @@
             const data = <?= json_encode(
                 [
                     'id' => $roomId,
+                    'computer' => $computer,
                     'gallery' => $gallery,
                     'doors' => $doors,
                     'images' => $images,
@@ -744,6 +763,11 @@
             try {
                 await room.mount('#stage');
                 window.room = room;
+                if (data.computer) {
+                    // Normal mode uses fixed defaults and the document assigned to this room.
+                    // A missing computer asset must not disable the gallery's image controls.
+                    await addComputer(room, data.computer).catch(error => console.error('Computer could not load:', error));
+                }
 
                 // Delegation also covers controls added after an upload or placement update.
                 list.addEventListener('click', async e => {

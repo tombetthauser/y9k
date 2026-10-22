@@ -71,6 +71,16 @@ export const createRoom = (data = {}, options = {}) => {
     return room;
 };
 
+// Load the self-contained computer only in rooms that request one.
+// Its module owns the viewer, scene objects, sounds, and optional test controls.
+export const addComputer = async (room, { assetVersion, ...options } = {}) => {
+    const url = new URL('./computer.js', import.meta.url);
+    const version = assetVersion ?? new URL(import.meta.url).searchParams.get('v');
+    if (version != null) url.searchParams.set('v', String(version));
+    const component = await import(url.href);
+    return component.addComputer(room, options);
+};
+
 export const createRoomStorage = (id, { endpoint = "index.php", onChange = () => { } } = {}) => {
     const url = endpoint + "?room=" + encodeURIComponent(id);
     const request = async (action, values = {}, file = null) => {
@@ -558,6 +568,9 @@ export class Room {
         // Outdoor imagery stays evenly bright regardless of the indoor electric lights.
         const trees = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.BackSide,
             transparent: true, alphaTest: 0.1, depthWrite: true, toneMapped: false });
+        // Expose the outdoor surfaces for optional sky/lighting editors.
+        this.skylightOutside = outside;
+        this.skylightTreeMaterial = trees;
         const clear = new THREE.MeshStandardMaterial({ side: THREE.BackSide,
             transparent: true, opacity: 0, depthWrite: false });
         textureLoader.load(roomAsset("images/static_images/trees.png"), texture => {
@@ -578,9 +591,16 @@ export class Room {
         // Lift the tree enclosure in inches without changing its original proportions.
         outside.position.y = inchesToWorld(this.options.skylightTreeLift);
         scene.add(outside);
-        textureLoader.load(roomAsset("images/static_images/windows.png"), texture => {
-            texture.colorSpace = THREE.SRGBColorSpace;
-            scene.background = texture;
+        // Editors can wait for the original sky instead of racing its asynchronous load.
+        this.skylightSkyReady = new Promise(resolve => {
+            textureLoader.load(roomAsset("images/static_images/windows.png"), texture => {
+                texture.colorSpace = THREE.SRGBColorSpace;
+                scene.background = texture;
+                resolve(texture);
+            }, undefined, error => {
+                console.warn("Skylight sky could not load:", error);
+                resolve(null);
+            });
         });
     }
 
@@ -3421,6 +3441,12 @@ export const createRoomLights = ({ ambient, directional, scene = null, isOn = tr
     const onBackground = scene && scene.background && scene.background.isColor
         ? scene.background.getHex()
         : null;
+    // Subscribers follow actual light pulses, including the startup flicker.
+    const listeners = new Set();
+    const notify = () => {
+        if (typeof onChange === "function") onChange(on);
+        for (const listener of listeners) listener(on);
+    };
     let on = !!isOn;
     const fixtures = [];
     const localLights = [];
@@ -3462,19 +3488,22 @@ export const createRoomLights = ({ ambient, directional, scene = null, isOn = tr
     apply();
     return {
         isOn: () => on,
+        onChange(listener) {
+            listeners.add(listener);
+            listener(on);
+            return () => listeners.delete(listener);
+        },
 
         setOn(next) {
             on = !!next;
             apply();
-            if (typeof onChange === "function")
-                onChange(on);
+            notify();
         },
 
         toggle() {
             on = !on;
             apply();
-            if (typeof onChange === "function")
-                onChange(on);
+            notify();
             return on;
         },
 
@@ -5923,6 +5952,8 @@ export const createRoomApp = ({ musicPath, musicVolume = 0.25, musicEntryChance 
         videoLightbox,
         wallClick,
         orbit,
+        // Allow room controls to pause idle rotation without rebuilding the scene.
+        setAutoSpin(speed) { autoSpin = Number(speed) || 0; },
         roomLights,
         syncViewportSize,
         setViewHeight,
