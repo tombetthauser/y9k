@@ -164,7 +164,13 @@
 
             // Placement metadata uses the same cm fields as the text interface
             if ($action === 'upload' || $action === 'move') {
-                if (!$gallery) throw new RuntimeException('Artwork can only be added or moved in galleries.');
+                // Hallways store perimeter segment numbers in the existing wall field.
+                $activeWalls = array_keys(array_filter($doors, static fn(array $door): bool => !empty($door['exists'])));
+                $opposite = count($activeWalls) === 2 && (
+                    (in_array('north', $activeWalls, true) && in_array('south', $activeWalls, true)) ||
+                    (in_array('east', $activeWalls, true) && in_array('west', $activeWalls, true))
+                );
+                $wallCount = $gallery ? 4 : (count($activeWalls) === 4 ? 12 : (count($activeWalls) === 3 ? 8 : ($opposite ? 4 : 6)));
 
                 $pos = [];
                 foreach (['wall', 'x', 'y', 'width'] as $col) {
@@ -175,7 +181,7 @@
                     $pos[$col] = (string) $val;
                 }
 
-                if (!in_array($pos['wall'], ['0', '1', '2', '3'], true) || (float) $pos['width'] <= 0) {
+                if (!ctype_digit($pos['wall']) || (int) $pos['wall'] >= $wallCount || (float) $pos['width'] <= 0) {
                     throw new RuntimeException('Choose a wall and a positive image width.');
                 }
 
@@ -215,6 +221,9 @@
                 $original = trim(preg_replace('/[^A-Za-z0-9._-]+/', '-', $original) ?? '', '.-');
                 $base = pathinfo($original, PATHINFO_FILENAME);
                 $name = substr($base !== '' ? $base : bin2hex(random_bytes(8)), 0, 80) . '.' . $ext;
+                if (!$gallery && ($ext !== 'png' || preg_match('/^(POSTIT(?:YELLOW|PINK|BLUE|GREEN|ORANGE)|COLLEGERULE|LEGALPAD|CLIPBOARD)__/', $name) !== 1)) {
+                    throw new RuntimeException('Hallways accept paper text notes only.');
+                }
                 $dir = imageStorageDirectory();
 
                 if (!is_dir($dir) && !mkdir($dir, 0755, true) && !is_dir($dir)) {
@@ -369,6 +378,22 @@
                 font-size: 13px;
                 line-height: 15px;
             }
+            /* Static text-image controls: scoped to the existing artwork editor. */
+            #wall-image-editor { max-height: 85vh; overflow-y: auto; max-width: min(430px, calc(100vw - 2em)); }
+            #wall-image-editor [hidden] { display: none !important; }
+            #wall-image-editor [data-note-controls] { margin: 10px 0; border: 1px solid black; }
+            #wall-image-editor [data-note-controls] label { display: flex; flex-wrap: wrap; margin: 6px 0; }
+            #wall-image-editor [data-note-controls] textarea { display: block; box-sizing: border-box; width: 100%; min-height: 110px; margin: 8px 0; resize: vertical; }
+            #wall-image-editor [data-note-controls] select { max-width: 100%; }
+            #wall-image-editor .note-preview-label { margin-top: 10px; }
+            #wall-image-editor [data-note-preview] {
+                box-sizing: border-box; width: 100%; margin: 4px auto 0; padding: 20px;
+                background: white;
+            }
+            #wall-image-editor [data-note-preview] canvas {
+                display: block; width: 75%; height: auto; margin: 0 auto;
+            }
+            #wall-image-editor [data-note-controls] p { max-width: 340px; line-height: 1.4; }
             .wall-image-editor label {
                 display: inline-flex;
                 align-items: center;
@@ -559,7 +584,7 @@
                 <!-- Shared image links/deletion fields - unplaced gallery images can also be positioned. -->
                 <div id="room-images">
                     <?php foreach ($images as $image): ?>
-                        <p><a href="<?= htmlspecialchars($image['url'], ENT_QUOTES, 'UTF-8') ?>" target="_blank" rel="noopener"><?= htmlspecialchars($image['filename'], ENT_QUOTES, 'UTF-8') ?></a></p>
+                        <p><a href="<?= htmlspecialchars($image['url'], ENT_QUOTES, 'UTF-8') ?>" target="_blank" rel="noopener"><?= htmlspecialchars(preg_match('/^(POSTIT(?:YELLOW|PINK|BLUE|GREEN|ORANGE)|WALLTEXT|COLLEGERULE|LEGALPAD|CLIPBOARD)__|^text-(?:post-it-|wall\.png|legal-pad|college-rule|clipboard)/i', $image['filename']) ? 'Text note' : $image['filename'], ENT_QUOTES, 'UTF-8') ?></a></p>
                         <?php if ($gallery && ($image['wall'] === null || $image['x'] === null || $image['y'] === null || $image['width'] === null)): ?>
                             <button type="button" data-place-image="<?= (int) $image['id'] ?>">Choose placement</button>
                         <?php endif; ?>
@@ -578,7 +603,7 @@
         <script type="module">
             // 3D setup - pass the room data to the reusable room helpers
             // A changed helper file gets a fresh URL so mobile browsers cannot reuse stale code.
-            import { GALLERY_LIGHTING_DEFAULTS, createRoom, createRoomStorage, writeStoredViewFacing, roomAsset, addComputer, addSkyLighting } from <?= json_encode(
+            import { GALLERY_LIGHTING_DEFAULTS, createRoom, createRoomStorage, writeStoredViewFacing, roomAsset, addComputer, addSkyLighting, wallTextKind } from <?= json_encode(
                 './helpers.js?v=' . max(filemtime(__DIR__ . '/helpers.js'), $computer['assetVersion'] ?? 0),
                 JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
             ) ?>;
@@ -613,7 +638,7 @@
                     link.href = image.url;
                     link.target = '_blank';
                     link.rel = 'noopener';
-                    link.textContent = image.filename;
+                    link.textContent = wallTextKind(image.filename) ? 'Text note' : image.filename;
                     p.appendChild(link);
                     items.appendChild(p);
 
@@ -663,11 +688,13 @@
             });
             const room = createRoom(data, {
                 persistence: storage,
+                hallwayUploads: true, // Wall-segment uploads; no transparent wall-text option in hallways.
+                wallTextEnabled: true, // Static paper notes and wall text; false restores image-only creation.
                 rememberLights: true, // Per-browser room lighting and last-visit history.
                 deferSkylightRender: true, // Reveal only after the correct time-of-day preset is applied.
                 gallerySkylight: true, // Enable skylights; false restores solid ceilings in every gallery.
-                skylightChance: 65, // Percentage of galleries with skylights: 0–100; stable for each room ID.
-                skylightSeed: 'y9k-skylights-v5', // Change this to reshuffle which galleries have skylights.
+                skylightChance: 35, // Percentage of galleries with skylights: 0–100; stable for each room ID.
+                skylightSeed: 'y9k-skylights-v7', // Change this to reshuffle which galleries have skylights.
                 ...GALLERY_LIGHTING_DEFAULTS,
                 ...(data.gallery ? { ambientLight: 2.7, directionalLight: 0.55 } : {}),
 

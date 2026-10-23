@@ -120,6 +120,145 @@ export function doorPresentation(context) {
     return { key, state, file: override.file ?? doorStateFile(state), glow: override.glow ?? 0.5 };
 }
 
+// BEGIN WALL TEXT: disable wallTextEnabled in index.php to remove the creation controls.
+// Physical inches match gallery doors (80 inches). Insets protect artwork such as the clip.
+export const WALL_TEXT_BACKGROUNDS = {
+    'post-it-yellow': { label: 'Post-it · yellow', file: 'post-it-yellow.jpg', width: 3, height: 3 },
+    'post-it-pink': { label: 'Post-it · pink', file: 'post-it-pink.jpg', width: 3, height: 3 },
+    'post-it-blue': { label: 'Post-it · blue', file: 'post-it-blue.jpg', width: 3, height: 3 },
+    'post-it-green': { label: 'Post-it · green', file: 'post-it-green.jpg', width: 3, height: 3 },
+    'post-it-orange': { label: 'Post-it · orange', file: 'post-it-orange.jpg', width: 3, height: 3 },
+    'college-rule': { label: 'College ruled', file: 'college-rule.jpg', width: 8.5, height: 11, inset: [0.6, 0.2, 0.2, 0.9] },
+    'legal-pad': { label: 'Legal pad', file: 'legal-pad.jpg', width: 8.5, height: 14, inset: [1, 0.2, 0.3, 0.8] },
+    clipboard: { label: 'Clipboard', file: 'clipboard.png', width: 9, height: 14.6, inset: [3, 0.5, 0.5, 0.6] },
+    wall: { label: 'Wall text · transparent' },
+};
+// Reserved prefixes survive ordinary uploads and identify flattened notes after reload.
+export const WALL_TEXT_PREFIXES = {
+    'post-it-yellow': 'POSTITYELLOW', 'post-it-pink': 'POSTITPINK', 'post-it-blue': 'POSTITBLUE',
+    'post-it-green': 'POSTITGREEN', 'post-it-orange': 'POSTITORANGE',
+    'college-rule': 'COLLEGERULE', 'legal-pad': 'LEGALPAD', clipboard: 'CLIPBOARD', wall: 'WALLTEXT',
+};
+export function wallTextKind(filename = '') {
+    const name = String(filename).split('/').pop();
+    const prefix = name.split('__')[0].toUpperCase();
+    const kind = Object.keys(WALL_TEXT_PREFIXES).find(key => WALL_TEXT_PREFIXES[key] === prefix);
+    if (kind && name.includes('__')) return kind;
+    // Recognize notes made before the reserved prefixes were introduced.
+    const legacy = name.replace(/^text-/, '').replace(/\.png$/i, '');
+    return name.startsWith('text-') && WALL_TEXT_BACKGROUNDS[legacy] ? legacy : null;
+}
+export function wallTextFilename(background, text) {
+    const words = text.trim().split(/\s+/).slice(0, 5).join('-').normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    return `${WALL_TEXT_PREFIXES[background]}__${(words || 'note').slice(0, 54)}.png`;
+}
+export const WALL_TEXT_FONTS = {
+    serif: { label: 'Serif', css: 'Times New Roman, Times, serif' },
+    sans: { label: 'Sans serif', css: 'Arial, Helvetica, sans-serif' },
+    mono: { label: 'Monospace', css: 'Courier New, Courier, monospace' },
+    comic: { label: 'Comic Sans', css: 'Comic Sans MS, Comic Sans, cursive' },
+    georgia: { label: 'Georgia', css: 'Georgia, Times New Roman, serif' },
+    verdana: { label: 'Verdana', css: 'Verdana, Geneva, sans-serif' },
+    trebuchet: { label: 'Trebuchet', css: 'Trebuchet MS, Arial, sans-serif' },
+};
+// Keep explicit newlines; split long words so even unbroken text stays inside its note.
+export function wrapWallText(text, maxWidth, measure) {
+    const lines = [];
+    for (const paragraph of text.replace(/\r\n?/g, '\n').split('\n')) {
+        let line = '';
+        for (const word of paragraph.trim().split(/\s+/).filter(Boolean)) {
+            if (line && measure(line + ' ' + word) <= maxWidth) { line += ' ' + word; continue; }
+            if (line) { lines.push(line); line = ''; }
+            for (const character of word) {
+                if (line && measure(line + character) > maxWidth) { lines.push(line); line = ''; }
+                line += character;
+            }
+        }
+        lines.push(line);
+    }
+    return lines;
+}
+const wallTextPaperImages = new Map();
+async function wallTextPaperImage(paper) {
+    if (!paper.file) return null;
+    if (!wallTextPaperImages.has(paper.file)) {
+        const promise = new Promise((resolve, reject) => {
+            const image = new Image();
+            image.onload = () => resolve(image);
+            image.onerror = () => { wallTextPaperImages.delete(paper.file); reject(new Error('Could not load the paper background.')); };
+            image.src = roomAsset('images/paper/' + paper.file);
+        });
+        wallTextPaperImages.set(paper.file, promise);
+    }
+    return wallTextPaperImages.get(paper.file);
+}
+// The same PNG supplies the live wall preview and the final ordinary image upload.
+export async function renderWallText({ background, text, width, font, fontSize, padding = 0.2, paddingX = padding, paddingY = padding, lineHeight, align }) {
+    const paper = WALL_TEXT_BACKGROUNDS[background];
+    const image = await wallTextPaperImage(paper);
+    width = paper.width ?? width;
+    const dpi = Math.min(144, 4096 / width);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * dpi));
+    const context = canvas.getContext('2d');
+    const fontCSS = `${fontSize * dpi / 72}px ${WALL_TEXT_FONTS[font].css}`;
+    context.font = fontCSS;
+    const [top, right, bottom, left] = (paper.inset ?? [0, 0, 0, 0]).map((value, index) => (value + (index % 2 === 0 ? paddingY : paddingX)) * dpi);
+    const available = Math.max(1, canvas.width - left - right);
+    const lines = wrapWallText(text || '[your text here]', available, value => context.measureText(value).width);
+    const linePixels = fontSize * dpi / 72 * lineHeight;
+    canvas.height = Math.max(1, Math.ceil(paper.height ? paper.height * dpi : top + bottom + lines.length * linePixels));
+    if (image) context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    context.save();
+    context.beginPath(); context.rect(left, top, available, Math.max(0, canvas.height - top - bottom)); context.clip();
+    context.font = fontCSS; context.fillStyle = '#000'; context.textBaseline = 'top'; context.textAlign = align;
+    const x = align === 'center' ? left + available / 2 : align === 'right' ? left + available : left;
+    lines.forEach((line, index) => context.fillText(line, x, top + index * linePixels));
+    context.restore();
+    const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error('Could not create the note PNG.')), 'image/png'));
+    return { file: new File([blob], wallTextFilename(background, text), { type: 'image/png' }), width, canvas,
+        clipped: Boolean(paper.height && top + bottom + lines.length * linePixels > canvas.height),
+        height: canvas.height / dpi };
+}
+// END WALL TEXT rendering helpers.
+
+// Layer each wall independently by database ID; unsaved previews sit above saved artwork.
+// One hundredth of an inch per image avoids coplanar flicker without a visible gap.
+export function layerWallImages(images, step = inchesToWorld(0.01)) {
+    const walls = new Map();
+    const normals = { north: [0, 1], south: [0, -1], west: [1, 0], east: [-1, 0] };
+    for (const art of images) {
+        const data = art.userData, previous = normals[data.wallLayerWall];
+        if (previous) {
+            art.position.x -= previous[0] * (data.wallLayerOffset ?? 0);
+            art.position.z -= previous[1] * (data.wallLayerOffset ?? 0);
+        }
+        data.wallLayerOffset = 0;
+        const wall = data.placement.wall;
+        const key = data.segment == null ? wall : `${wall}:${data.segment}`;
+        if (!walls.has(key)) walls.set(key, []);
+        walls.get(key).push(art);
+    }
+    for (const artwork of walls.values()) {
+        const wall = artwork[0].userData.placement.wall;
+        artwork.sort((a, b) => {
+            const left = String(a.userData.roomImageId), right = String(b.userData.roomImageId);
+            const leftSaved = /^\d+$/.test(left), rightSaved = /^\d+$/.test(right);
+            if (leftSaved && rightSaved) return BigInt(left) < BigInt(right) ? -1 : BigInt(left) > BigInt(right) ? 1 : 0;
+            return leftSaved === rightSaved ? 0 : leftSaved ? -1 : 1;
+        });
+        artwork.forEach((art, rank) => {
+            const offset = rank * step, normal = normals[wall];
+            if (!normal) return;
+            art.position.x += normal[0] * offset;
+            art.position.z += normal[1] * offset;
+            art.userData.wallLayerWall = wall;
+            art.userData.wallLayerOffset = offset;
+        });
+    }
+}
+
 export const createRoom = (data = {}, options = {}) => {
     const doors = Object.fromEntries(Object.entries(data.doors ?? {}).map(([wall, door]) => {
         if (!door || door.exists === false)
@@ -135,8 +274,7 @@ export const createRoom = (data = {}, options = {}) => {
     const config = { roomId: data.id ?? "demo", neighbors: data.neighbors ?? [], exitWall: data.exitWall, roomInfo: data.roomInfo, exitNotice: data.exitNotice, doors, ...options };
     const gallery = data.gallery ?? Object.values(config.doors).filter(door => door && door.exists !== false).length < 2;
     const room = gallery ? new Gallery(config) : new Hallway(config);
-    if (gallery)
-        room.addImages(data.images ?? [], { stored: true });
+    room.addImages(data.images ?? [], { stored: true });
     return room;
 };
 
@@ -196,7 +334,7 @@ export const createRoomStorage = (id, { endpoint = "index.php", onChange = () =>
 };
 
 export const storedPlacement = (p) => {
-    return { wall: CARDINAL_WALLS.indexOf(p.wall), x: p.x * 2.54, y: p.y * 2.54, width: p.width * 2.54 };
+    return { wall: p.segment ?? CARDINAL_WALLS.indexOf(p.wall), x: p.x * 2.54, y: p.y * 2.54, width: p.width * 2.54 };
 };
 
 const CARDINAL_WALLS = ["north", "east", "south", "west"];
@@ -256,14 +394,19 @@ export const roomOutline = ({ width = 12, length = 12, corridorWidth = 4, doors 
         points.push([xs[x], zs[z]]);
         key = edges.get(key).join(",");
     } while (key !== start);
-    return points.filter((point, i) => {
+    const outline = points.filter((point, i) => {
         const before = points[(i + points.length - 1) % points.length];
         const after = points[(i + 1) % points.length];
         return (point[0] - before[0]) * (after[1] - point[1]) !== (point[1] - before[1]) * (after[0] - point[0]);
     });
+    // Start at the northernmost north-facing edge, then follow the clockwise perimeter.
+    const north = outline.map(([x, z], index) => ({ x, z, index, next: outline[(index + 1) % outline.length] }))
+        .filter(edge => edge.next[0] > edge.x && edge.next[1] === edge.z)
+        .sort((a, b) => a.z - b.z || a.x - b.x)[0].index;
+    return [...outline.slice(north), ...outline.slice(0, north)];
 };
 
-const roomSegments = (outline) => {
+export const roomSegments = (outline) => {
     return outline.map(([x1, z1], index) => {
         const [x2, z2] = outline[(index + 1) % outline.length];
         const dx = x2 - x1, dz = z2 - z1;
@@ -574,6 +717,10 @@ export class Room {
             offLineColor: this.hallway ? 0x111111 : o.galleryOffEdgeColor,
             molding: o.molding, cornerLines: o.cornerLines, horizontalLines: o.horizontalLines ?? !olderHallway, wallClick, roomLights
         });
+        this.layout.wallMeshes.forEach((mesh, index) => {
+            mesh.userData.segment = index;
+            mesh.userData.wall = this.segments[index].wall;
+        });
         if (!this.hallway && o.gallerySkylight) this._addSkylightOutside();
         this.materials = materials;
         this._factories = this.app.createPropFactories({ ...this.layout, doorHeight: inchesToWorld(o.doorHeight) });
@@ -593,7 +740,7 @@ export class Room {
             await task();
         if (o.editor && !this.hallway)
             this.enableEditor();
-        if (o.editor && !this.hallway)
+        if (o.editor || (this.hallway && o.hallwayUploads))
             this.enableWallEditor();
         if (o.keyboard)
             this.keyboard = bindRoomKeyboard({ room: this, turnSpeed: o.keyboardTurnSpeed, facingTolerance: o.doorFacingTolerance });
@@ -1217,6 +1364,7 @@ export class Room {
     }
 
     async _hit(object) {
+        if (object.userData.isDoor && this.wallEditor?.open) return;
         if (this._doorTravelPending) return;
         const data = object.userData;
         // Releasing the press that opened artwork editing must not open its lightbox.
@@ -1277,28 +1425,39 @@ export class Room {
         this.options.onHit?.(object, this);
     }
 
-    addImage({ wall = "north", x = 0, y = this.options.artY, width = this.options.artWidth, file, id = null, name = null, editable = true } = {}) {
+    addImage({ wall = "north", x = 0, y = this.options.artY, width = this.options.artWidth, file, id = null, name = null, editable = true, segment = null } = {}) {
         if (!file)
             throw new Error("addImage needs a URL, File, or Blob in file.");
-        wall = roomWall(wall);
+        if (this.hallway && typeof wall === "number") segment = wall;
+        else wall = roomWall(wall);
         id = id ?? newPlacementId();
         return this._enqueue(async () => {
             if (this.images.has(String(id)))
                 throw new Error("Duplicate image id: " + id);
-            const anchor = this._anchor({ wall });
+            if (this.hallway && segment != null) {
+                const edge = this.segments[segment];
+                if (!edge) { console.warn('Skipping artwork with an unavailable hallway wall:', segment); return; }
+                wall = edge.wall;
+            }
+            const anchor = this._anchor({ wall, segment });
+            segment = this.hallway ? anchor.edge.index : null;
             const bounds = this._wallBounds(anchor);
-            const add = createAddUserWallImage({ ...this.app, ...this.layout, bounds });
+            const add = createAddUserWallImage({ ...this.app, ...this.layout, bounds,
+                wallInset: this.hallway ? (this.layout.wallInset ?? 0.05) + inchesToWorld(0.01) : this.layout.wallInset });
             const art = await add(wall, inchesToWorld(x) * wallRightSign(wall), file, inchesToWorld(width), {
                 heightFromFloor: this.layout.height / 2 + inchesToWorld(y),
             });
             if (!art)
                 throw new Error("Could not load image: " + (name ?? id));
             art.userData.roomImageId = String(id);
+            art.userData.segment = segment;
+            art.userData.artWallInset = this.hallway ? (this.layout.wallInset ?? 0.05) + inchesToWorld(0.01) : this.layout.wallInset;
             art.userData.editable = editable;
             art.userData.isUserArt = editable;
             if (name)
                 art.userData.imageName = name;
             this.images.set(String(id), art);
+            layerWallImages(this.images.values());
         });
     }
 
@@ -1341,7 +1500,7 @@ export class Room {
             throw new Error("Unknown image id: " + id);
         const p = art.userData.placement;
         return {
-            id: String(id), wall: p.wall, x: worldToInches(p.x) * wallRightSign(p.wall),
+            id: String(id), wall: p.wall, segment: art.userData.segment ?? null, x: worldToInches(p.x) * wallRightSign(p.wall),
             y: worldToInches(p.heightFromFloor - this.layout.height / 2), width: worldToInches(art.userData.artWidth)
         };
     }
@@ -1355,9 +1514,12 @@ export class Room {
         const art = this.images.get(String(id));
         if (!art || !art.userData.editable)
             throw new Error("This image cannot be edited.");
-        const p = { ...this.imagePlacement(id), ...patch };
+        const current = this.imagePlacement(id);
+        const p = { ...current, ...patch };
+        // Saved notes are static physical objects. Creation previews can still set their initial size.
+        if (wallTextKind(art.userData.imageName) && !String(id).startsWith('preview-')) p.width = current.width;
         p.wall = roomWall(p.wall);
-        const bounds = this._wallBounds(this._anchor({ wall: p.wall }));
+        const bounds = this._wallBounds(this._anchor({ wall: p.wall, segment: art.userData.segment }));
         const half = p.wall === "north" || p.wall === "south" ? bounds.halfX : bounds.halfZ;
         p.x = Math.max(-worldToInches(half), Math.min(worldToInches(half), Number(p.x)));
         p.y = Math.max(-this.options.height * 6, Math.min(this.options.height * 6, Number(p.y)));
@@ -1370,7 +1532,10 @@ export class Room {
             width: inchesToWorld(p.width),
             uX: (inchesToWorld(p.x) * wallRightSign(p.wall) + half) / (2 * half),
             uY: (inchesToWorld(p.y) + this.layout.height / 2) / this.layout.height,
-        }, { ...this.layout, bounds });
+        }, { ...this.layout, bounds, wallInset: art.userData.artWallInset ?? this.layout.wallInset });
+        // Placement resets the mesh to the wall, so its old offset is already gone.
+        art.userData.wallLayerOffset = 0;
+        layerWallImages(this.images.values());
         this.selectImage(id);
         return this.imagePlacement(id);
     }
@@ -1384,6 +1549,7 @@ export class Room {
         this.app.lightbox?.close();
         removeUserWallImage(art, { clickable: this.app.clickable });
         this.images.delete(String(id));
+        layerWallImages(this.images.values());
         this.selectedImage = null;
         this._refreshEditor();
     }
@@ -1530,7 +1696,7 @@ export class Room {
 
     // Double-click a gallery wall to preview an upload without changing the saved room.
     enableWallEditor() {
-        if (this.hallway || this.wallEditor)
+        if (this.wallEditor)
             return this;
         const panel = document.createElement("dialog");
         panel.id = "wall-image-editor";
@@ -1541,7 +1707,26 @@ export class Room {
                 <div class="wall-editor-filename"></div>
                 <button type="button" name="close" aria-label="close artwork editor">x</button>
             </div>
-            <input name="file" type="file" aria-label="choose image" accept="image/jpeg,image/png,image/gif,image/webp"><br>
+            <label data-create-kind hidden><span class="modal-label">type</span>: <select name="kind"><option value="image">image</option><option value="text">text</option></select></label><br data-create-kind hidden>
+            <div data-image-file><input name="file" type="file" aria-label="choose image" accept="image/jpeg,image/png,image/gif,image/webp"><br>
+                <label data-upload-name><span class="modal-label">filename</span>: <input name="uploadName" type="text" aria-label="Optional filename without extension" placeholder="original filename" maxlength="80"></label>
+                <small data-upload-name>optional · no file extension</small>
+            </div>
+            <fieldset data-note-controls hidden>
+                <legend>Static text image</legend>
+                <label>paper <select name="notePaper">${Object.entries(WALL_TEXT_BACKGROUNDS).map(([key, paper]) => `<option value="${key}">${paper.label}</option>`).join('')}</select></label>
+                <textarea name="noteText" rows="6" placeholder="[your text here]" aria-label="Note text"></textarea>
+                <label>font <select name="noteFont">${Object.entries(WALL_TEXT_FONTS).map(([key, font]) => `<option value="${key}">${font.label}</option>`).join('')}</select></label>
+                <label>font size <input name="noteFontSize" type="range" min="6" max="144" step="1" value="12"><output data-note-value="noteFontSize"></output></label>
+                <label>left / right padding <input name="notePaddingX" type="range" min="0" max="2" step="0.05" value="0.2"><output data-note-value="notePaddingX"></output></label>
+                <label>top / bottom padding <input name="notePaddingY" type="range" min="0" max="2" step="0.05" value="0.2"><output data-note-value="notePaddingY"></output></label>
+                <label>line spacing <input name="noteLineHeight" type="range" min="1" max="2.5" step="0.05" value="1.3"><output data-note-value="noteLineHeight"></output></label>
+                <label>alignment <select name="noteAlign"><option value="left">left</option><option value="center">center</option><option value="right">right</option></select></label>
+                <div class="note-preview-label">Preview</div>
+                <div data-note-preview role="img" aria-label="Text image preview"></div>
+                <p data-note-size></p>
+                <p>Black text is saved as a PNG. Paper sizes are fixed; text beyond the paper is clipped. Saved text cannot be edited.</p>
+            </fieldset>
             <label><span><span class="modal-label">wall</span>:</span> <select name="wall"><option>north</option><option>east</option><option>south</option><option>west</option></select></label><br>
             <label><span><span class="modal-label">from left</span>:</span> <input name="x" type="range" step="0.1"><output data-value="x"></output></label><br>
             <label><span><span class="modal-label">from floor</span>:</span> <input name="y" type="range" step="0.1"><output data-value="y"></output></label><br>
@@ -1564,13 +1749,41 @@ export class Room {
         status.style.whiteSpace = "pre-wrap";
         status.style.overflowWrap = "anywhere";
         let id = null, file = null, saved = null, busy = false;
+        let noteTimer = null, activeSegment = null;
+        if (this.hallway) {
+            fields.notePaper.querySelector('[value="wall"]').remove();
+            fields.kind.querySelector('[value="image"]').remove();
+        }
+        const textMode = () => !saved && this.options.wallTextEnabled && fields.kind.value === 'text';
+        const noteControls = panel.querySelector('[data-note-controls]');
+        const syncNoteControls = () => {
+            if (this.hallway && !saved) fields.kind.value = 'text';
+            const isText = textMode();
+            fields.wall.closest('label').hidden = this.hallway;
+            fields.wall.disabled = busy || this.hallway;
+            panel.querySelectorAll('[data-create-kind]').forEach(element => element.hidden = this.hallway || Boolean(saved) || !this.options.wallTextEnabled);
+            noteControls.hidden = !isText;
+            panel.querySelector('[data-image-file]').hidden = isText;
+            const paper = WALL_TEXT_BACKGROUNDS[fields.notePaper.value];
+            const savedName = saved && this.images.get(String(id))?.userData.imageName;
+            const savedKind = savedName && wallTextKind(savedName);
+            const locked = Boolean(savedKind) || Boolean(isText && paper.width);
+            fields.width.disabled = busy || locked;
+            fields.width.closest('label').hidden = locked;
+            panel.querySelectorAll('[data-upload-name]').forEach(element => element.hidden = Boolean(saved));
+            if (isText && paper.width) fields.width.value = paper.width;
+            for (const key of ['noteFontSize', 'notePaddingX', 'notePaddingY', 'noteLineHeight'])
+                panel.querySelector(`[data-note-value="${key}"]`).textContent = fields[key].value + (key === 'noteFontSize' ? ' pt' : key.startsWith('notePadding') ? ' in' : ' ×');
+        };
+
         const idle = [];
-        const halfWidth = () => (fields.wall.value === "north" || fields.wall.value === "south"
+        const halfWidth = () => this.hallway && activeSegment != null
+            ? worldToInches(this.segments[activeSegment].length) / 2 : (fields.wall.value === "north" || fields.wall.value === "south"
             ? this.options.width : this.options.length) * 6;
         const halfHeight = this.options.height * 6;
         // The form uses left-edge/floor measurements; rendering and storage keep center coordinates.
         const placement = () => ({
-            wall: fields.wall.value, x: Number(fields.x.value) - halfWidth(),
+            wall: fields.wall.value, segment: this.hallway ? activeSegment : null, x: Number(fields.x.value) - halfWidth(),
             y: Number(fields.y.value) - halfHeight, width: Number(fields.width.value)
         });
         // Match the marker to the rendered preview, including its wall orientation and width.
@@ -1580,7 +1793,7 @@ export class Room {
             const art = id && this.images.get(id);
             const pose = art ?? new THREE.Object3D();
             if (!art) {
-                const bounds = this._wallBounds(this._anchor({ wall: p.wall }));
+                const bounds = this._wallBounds(this._anchor({ wall: p.wall, segment: p.segment }));
                 placeOnWall(pose, p.wall, inchesToWorld(p.x) * wallRightSign(p.wall),
                     inchesToWorld(p.y), inchesToWorld(p.width) / 2, bounds);
             }
@@ -1592,11 +1805,12 @@ export class Room {
         };
         const limits = () => {
             fields.x.min = fields.y.min = 0;
-            fields.x.max = halfWidth() * 3;
-            fields.y.max = halfHeight * 3;
+            fields.x.max = halfWidth() * (this.hallway ? 2 : 3);
+            fields.y.max = halfHeight * (this.hallway ? 2 : 3);
             fields.width.max = halfWidth() * 3;
         };
         const fill = p => {
+            if (this.hallway && p.segment != null) activeSegment = p.segment;
             fields.wall.value = p.wall;
             limits();
             const values = { x: p.x + halfWidth(), y: p.y + halfHeight, width: p.width };
@@ -1610,27 +1824,75 @@ export class Room {
             updateMarker();
         };
         // Disable controls during file loading or a save so two operations cannot overlap.
-        const run = async action => {
+        const run = async (action, { preview = false } = {}) => {
             if (busy) return;
             busy = true;
-            [...fields].forEach(field => field.disabled = true);
+            // Keep the textarea focused while PNG previews update, including on mobile.
+            const locked = [...fields].filter(field => !preview || field.tagName === 'BUTTON');
+            locked.forEach(field => field.disabled = true);
             status.textContent = "";
             try { await action(); }
             catch (error) { status.textContent = error.message; }
             finally {
                 busy = false;
                 [...fields].forEach(field => field.disabled = false);
+                syncNoteControls();
                 idle.splice(0).forEach(resolve => resolve());
             }
         };
         const discard = async () => {
+            clearTimeout(noteTimer);
             if (id && this.images.has(id)) {
                 if (saved) await this.moveImage(id, saved, { persist: false });
                 else await this.deleteImage(id, { persist: false });
             }
             id = file = saved = null;
             fields.file.value = "";
+            fields.uploadName.value = "";
         };
+        // BEGIN WALL TEXT editor integration. Existing uploaded images keep the original path.
+        const renderTextPreview = async () => {
+            if (!textMode()) return;
+            const rendered = await renderWallText({ background: fields.notePaper.value, text: fields.noteText.value,
+                width: Number(fields.width.value), font: fields.noteFont.value, fontSize: Number(fields.noteFontSize.value),
+                paddingX: Number(fields.notePaddingX.value), paddingY: Number(fields.notePaddingY.value), lineHeight: Number(fields.noteLineHeight.value), align: fields.noteAlign.value });
+            // Reuse the actual rendered canvas; no second rendering can drift from the PNG.
+            panel.querySelector('[data-note-preview]').replaceChildren(rendered.canvas);
+            const previous = id, next = 'preview-' + newPlacementId();
+            this.addImage({ ...placement(), width: rendered.width, id: next, file: rendered.file, name: rendered.file.name });
+            await this.ready;
+            id = next; file = rendered.file;
+            if (previous && this.images.has(previous)) await this.deleteImage(previous, { persist: false });
+            fields.width.value = rendered.width;
+            filename.textContent = WALL_TEXT_BACKGROUNDS[fields.notePaper.value].label;
+            panel.querySelector('[data-note-size]').textContent = `${rendered.width.toFixed(1)} × ${rendered.height.toFixed(1)} in`;
+            fill(this.imagePlacement(id));
+            status.textContent = rendered.clipped ? 'Text overflows the paper and will be clipped. Reduce font size, padding or line spacing to fit.' : 'Preview only. Save to upload this static PNG.';
+        };
+        const scheduleTextPreview = () => {
+            clearTimeout(noteTimer);
+            noteTimer = setTimeout(() => {
+                if (!textMode()) return;
+                if (busy) { scheduleTextPreview(); return; }
+                run(renderTextPreview, { preview: true });
+            }, 220);
+        };
+        fields.kind.onchange = () => run(async () => {
+            await discard();
+            syncNoteControls();
+            filename.textContent = '';
+            if (textMode()) await renderTextPreview();
+            else { fields.width.value = this.options.artWidth; measurements(); updateMarker(); }
+        });
+        fields.notePaper.onchange = () => run(async () => {
+            clearTimeout(noteTimer);
+            if (fields.notePaper.value === 'wall') {
+                fields.width.value = 24; fields.noteFontSize.value = 48;
+            } else fields.noteFontSize.value = 12;
+            syncNoteControls();
+            await renderTextPreview();
+        });
+        // END WALL TEXT editor integration.
         this.closeWallEditor = async () => {
             if (busy) await new Promise(resolve => idle.push(resolve));
             await discard();
@@ -1651,6 +1913,7 @@ export class Room {
             if (!next) return;
             await discard();
             file = next;
+            fields.uploadName.placeholder = file.name.replace(/\.[^.]+$/, '');
             filename.textContent = file.name;
             id = "preview-" + newPlacementId();
             this.addImage({ ...placement(), id, file, name: file.name });
@@ -1661,6 +1924,10 @@ export class Room {
         });
         // Moving the preview updates the mesh only; no request is sent until Save.
         form.addEventListener("input", event => {
+            if (event.target === fields.kind || event.target === fields.notePaper || event.target === fields.uploadName) return;
+            if (textMode() && (event.target.name.startsWith('note') || event.target === fields.width)) {
+                syncNoteControls(); measurements(); scheduleTextPreview(); return;
+            }
             if (event.target === fields.wall) limits();
             measurements();
             if (busy || event.target === fields.file || !form.checkValidity()) return;
@@ -1669,11 +1936,20 @@ export class Room {
                 .catch(error => status.textContent = error.message.toLowerCase());
         });
         const save = () => run(async () => {
+            clearTimeout(noteTimer);
+            if (textMode()) {
+                if (!fields.noteText.value.trim()) throw new Error('Enter some text before saving.');
+                await renderTextPreview();
+            }
             if (!id) { panel.close(); return; }
             const storage = this.options.persistence;
             if (!storage?.upload || !storage?.move) throw new Error("no image storage is configured.");
             await this.moveImage(id, placement(), { persist: false });
             if (file) {
+                if (!textMode() && fields.uploadName.value.trim()) {
+                    const extension = file.name.includes('.') ? file.name.split('.').pop() : 'png';
+                    file = new File([file], fields.uploadName.value.trim() + '.' + extension, { type: file.type });
+                }
                 const result = await storage.upload(this.imagePlacement(id), file);
                 // Keep the existing preview mesh, replacing only its temporary identity.
                 const art = this.images.get(id);
@@ -1684,6 +1960,7 @@ export class Room {
                 if (art.userData.imageFile?.startsWith("blob:")) URL.revokeObjectURL(art.userData.imageFile);
                 art.userData.imageFile = result.url;
                 this.images.set(id, art);
+                layerWallImages(this.images.values());
                 file = null;
                 fields.file.value = "";
             } else {
@@ -1708,6 +1985,8 @@ export class Room {
                     if (!object.visible) return false;
                 return hit.object.isMesh;
             });
+            if (this.hallway && hit?.object.userData.isDoor)
+                return ray.intersectObjects(this.app.wallClick.walls, false)[0];
             return hit;
         };
         const blocked = () => busy || this._doorTravelPending;
@@ -1718,16 +1997,22 @@ export class Room {
             const wall = hit.object.userData.wall;
             if (!CARDINAL_WALLS.includes(wall)) return;
             await this._closeModals();
+            activeSegment = this.hallway ? hit.object.userData.segment : null;
+            const edge = this.hallway ? this.segments[activeSegment] : null;
             fill({
-                wall, x: worldToInches(wall === "north" || wall === "south" ? hit.point.x : hit.point.z) * wallRightSign(wall),
+                segment: activeSegment,
+                wall, x: worldToInches(wall === "north" || wall === "south" ? hit.point.x - (edge?.x ?? 0) : hit.point.z - (edge?.z ?? 0)) * wallRightSign(wall),
                 y: worldToInches(hit.point.y), width: this.options.artWidth
             });
+            fields.kind.value = this.hallway ? 'text' : 'image';
+            syncNoteControls();
             filename.textContent = "";
             fields.file.hidden = false;
             fields.remove.hidden = true;
             status.textContent = "";
             updateMarker();
             panel.show();
+            if (textMode()) await run(renderTextPreview);
         };
         let lastTouch = -Infinity, touchStart = null, previousTap = null;
         this.app.canvas.addEventListener("dblclick", event => {
@@ -1783,6 +2068,9 @@ export class Room {
             const point = { clientX: event.clientX, clientY: event.clientY };
             hold = setTimeout(async () => {
                 if (blocked()) return;
+                if (!emptyWall && !this.images.has(String(imageId))) return;
+                // Consume the entire hold gesture, even if release hits overlapping artwork.
+                this.app.orbit.suppressClick();
                 if (emptyWall) {
                     previousTap = touchStart = null;
                     await openWallEditor(point);
@@ -1795,8 +2083,10 @@ export class Room {
                 id = String(imageId);
                 saved = this.imagePlacement(id);
                 file = null;
+                fields.kind.value = 'image';
+                syncNoteControls();
                 fill(saved);
-                filename.textContent = art.userData.imageName ?? "";
+                filename.textContent = wallTextKind(art.userData.imageName) ? "" : art.userData.imageName ?? "";
                 fields.file.hidden = true;
                 fields.remove.hidden = false;
                 status.textContent = "";
@@ -1826,6 +2116,7 @@ export class Room {
         }
         for (const action of ["move", "delete"])
             this.editor.querySelector(`[data-action=${action}]`).disabled = !art?.userData.editable;
+        this.editorFields.width.disabled = Boolean(art && wallTextKind(art.userData.imageName));
         this.editor.querySelector('[data-action=upload]').disabled = false;
         this.editor.querySelector('[data-action=clear]').disabled = false;
     }
@@ -2513,7 +2804,8 @@ export const setupLightbox = ({ root = document.getElementById("lightbox"), sfxP
             (imageFile.startsWith("blob:")
                 ? "uploaded image"
                 : imageFile.split("/").pop());
-        caption.textContent = label;
+        caption.textContent = wallTextKind(displayName) ? '' : label;
+        caption.hidden = Boolean(wallTextKind(displayName));
         root.classList.add("is-open");
         root.setAttribute("aria-hidden", "false");
         syncDeleteButton();
@@ -5771,7 +6063,7 @@ export const bindOrbitPointer = ({ canvas, camera, clickable, onHit, dragSens = 
             canvas.releasePointerCapture(e.pointerId);
         }
         catch (_) { }
-        if (didDrag || e.type === "pointercancel")
+        if (didDrag || e.type !== "pointerup")
             return;
         const rect = canvas.getBoundingClientRect();
         pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -5785,10 +6077,13 @@ export const bindOrbitPointer = ({ canvas, camera, clickable, onHit, dragSens = 
     };
     canvas.addEventListener("pointerup", endDrag);
     canvas.addEventListener("pointercancel", endDrag);
+    canvas.addEventListener("lostpointercapture", endDrag);
     return {
         getAngle: readAngle,
         setAngle: writeAngle,
         isDragging: () => dragging,
+        // A long press handled by an editor must not also become a scene click.
+        suppressClick: () => { didDrag = true; },
     };
 };
 
