@@ -82,6 +82,44 @@ export const galleryHasSkylight = (roomId, { gallerySkylight = false, skylightCh
     return (hash >>> 0) / 4294967296 < chance / 100;
 };
 
+// Door texture configuration. Paths resolve through roomAsset(), like other room images.
+// Name custom files: door--from-<type>-<on|off>--to-<type>-<on|off>--<period>.png
+// Types: hallway, gallery, gallery-skylight. Periods: day, dawn, evening, night.
+export const DOOR_TEXTURES = {
+    bright: 'images/door-2.jpg',
+    medium: 'images/door-5.jpg',
+    dark: 'images/door-1.jpg',
+};
+// Add exact scenarios here to experiment without changing the selection logic.
+// Example entry (uncomment after adding the image):
+// 'from-hallway-on__to-gallery-skylight-off__night': {
+//     file: 'images/doors/door--from-hallway-on--to-gallery-skylight-off--night.png',
+//     state: 'medium', glow: 0.5,
+// },
+export const DOOR_TEXTURE_OVERRIDES = {};
+
+export function galleryDoorState({ lightsOn, period }) {
+    if (lightsOn || period === 'day') return 'bright';
+    return period === 'dawn' || period === 'evening' ? 'medium' : 'dark';
+}
+// Preserve the appearance from before the blue-night and dark-gallery experiments.
+export function destinationDoorState({ viewerHallway, gallery, skylight, lightsOn, period, distinctGalleryDoors }) {
+    if (skylight) return galleryDoorState({ lightsOn, period });
+    if (viewerHallway && lightsOn) return gallery ? 'bright' : 'medium';
+    return !viewerHallway && gallery && distinctGalleryDoors ? 'bright' : 'dark';
+}
+export const doorStateFile = state => DOOR_TEXTURES[state] ?? DOOR_TEXTURES.dark;
+export function doorScenarioKey(context) {
+    const from = context.viewerHallway ? 'hallway' : context.viewerSkylight ? 'gallery-skylight' : 'gallery';
+    const to = !context.gallery ? 'hallway' : context.skylight ? 'gallery-skylight' : 'gallery';
+    return `from-${from}-${context.viewerOn ? 'on' : 'off'}__to-${to}-${context.lightsOn ? 'on' : 'off'}__${context.period}`;
+}
+export function doorPresentation(context) {
+    const key = doorScenarioKey(context), override = DOOR_TEXTURE_OVERRIDES[key] ?? {};
+    const state = override.state ?? destinationDoorState(context);
+    return { key, state, file: override.file ?? doorStateFile(state), glow: override.glow ?? 0.5 };
+}
+
 export const createRoom = (data = {}, options = {}) => {
     const doors = Object.fromEntries(Object.entries(data.doors ?? {}).map(([wall, door]) => {
         if (!door || door.exists === false)
@@ -325,6 +363,7 @@ export class Room {
             showRoomNumbers: false, distinctGalleryDoors: true, defaultFixtures: true, defaultFurnishings: true, editor: !hallway, roomId: "demo", persistence: null,
             ...options,
         };
+        this.skylightPolicy = { ...this.options };
         if (!hallway)
             this.options.gallerySkylight = galleryHasSkylight(this.options.roomId, this.options);
         if (!hallway && !this.options.gallerySkylight) {
@@ -542,6 +581,10 @@ export class Room {
             reactiveFace: !this.hallway && o.gallerySkylight });
         for (const [wall, door] of Object.entries(this.doors))
             await this._createDoor(wall, door);
+        if (Object.values(this.doors).some(spec => spec.applySkyDoorGlow)) {
+            setInterval(() => this._refreshSkylightDoors(), 30000);
+            window.addEventListener('storage', () => this._refreshSkylightDoors());
+        }
         if (this.hallway)
             this._addReferenceHallway();
         if (!this.hallway)
@@ -564,7 +607,8 @@ export class Room {
                 .catch(error => { this._resetDoorTransition(); console.error("Room entry transition failed", error); });
         }
         if (arrival.adjacent && !animateEntry) this._playRoomSound(o.doorCloseSound, o.doorSfxVolume);
-        this.app.startLoop();
+        // The live page reveals skylight rooms only after their sky preset is ready.
+        if (!(o.deferSkylightRender && !this.hallway && o.gallerySkylight)) this.app.startLoop();
         // Saved-on rooms render lit immediately; only new non-adjacent arrivals flicker on.
         if (!arrival.alreadyOn && arrival.automatic) this._setRoomLights(true);
         if (o.rememberLights) roomLightState.visit(o.roomId);
@@ -696,13 +740,17 @@ export class Room {
         const a = this._anchor({ wall });
         const add = createAddWallDoor({ ...this.app, ...this.layout, roomHeight: this.layout.height, bounds: this._wallBounds(a) });
         const galleryDoor = spec.destinationIsGallery ?? spec.bright ?? false;
-        // Daylight keeps skylight galleries illuminated even with their electric lights off.
-        const skylightDoor = galleryDoor && galleryHasSkylight(spec.neighborId, this.options);
-        const illuminated = this.hallway ? skylightDoor || roomLightState.isOn(spec.neighborId)
-            : galleryDoor && this.options.distinctGalleryDoors;
+        const skylightDoor = galleryDoor && galleryHasSkylight(spec.neighborId, this.skylightPolicy);
+        const resolveAppearance = () => doorPresentation({ viewerHallway: this.hallway,
+            viewerSkylight: !this.hallway && this.options.gallerySkylight,
+            viewerOn: this.app.roomLights.isOn(), gallery: galleryDoor, skylight: skylightDoor,
+            lightsOn: roomLightState.isOn(spec.neighborId), period: getCaliforniaSkyPeriod().period,
+            distinctGalleryDoors: this.options.distinctGalleryDoors });
+        const appearance = resolveAppearance();
+        const state = appearance.state;
+        const illuminated = state !== 'dark';
         const doorHeight = inchesToWorld(spec.height ?? this.options.doorHeight);
-        const litTexture = this.hallway && !galleryDoor ? "images/door-5.jpg" : "images/door-2.jpg";
-        const file = spec.file ?? roomAsset(illuminated ? litTexture : "images/door-1.jpg");
+        const file = spec.file ?? roomAsset(appearance.file);
         const span = a.edge.length / 2;
         const fixedAlong = this.hallway ? 0 : span - doorHeight * (264 / 676) / 2 - 0.85;
         const mesh = await add(wall, file, doorHeight, {
@@ -714,7 +762,26 @@ export class Room {
             width: spec.width == null ? null : inchesToWorld(spec.width),
         });
         spec.mesh = mesh;
-        if (mesh && this.hallway && illuminated)
+        if (mesh && !spec.file) {
+            spec.skyDoorState = state;
+            spec.doorAppearance = appearance;
+            spec.resolveDoorAppearance = resolveAppearance;
+            spec.applySkyDoorGlow = () => {
+                const lit = spec.skyDoorState !== 'dark';
+                const color = 0xffffff;
+                mesh.material.color.setHex(color);
+                mesh.material.emissive.setHex(lit ? color : 0x000000);
+                mesh.material.emissiveMap = lit ? mesh.material.map : null;
+                mesh.material.emissiveIntensity = lit ? spec.doorAppearance.glow * (this.app.roomLights.isOn() ? 1 : 0.8) : 0;
+                mesh.material.toneMapped = !lit;
+                mesh.material.needsUpdate = true;
+            };
+            spec.applySkyDoorGlow();
+            this.app.roomLights.onChange(() => {
+                spec.applySkyDoorGlow();
+                this._refreshSkylightDoors();
+            });
+        } else if (mesh && this.hallway && illuminated)
             this.app.roomLights.registerDoorGlow(mesh.material);
         // Gallery entrances get the same raised, softly illuminated housing as exit signs.
         if (mesh && galleryDoor)
@@ -725,6 +792,37 @@ export class Room {
         if (spec.exitSign && mesh && !this.hallway)
             this._factories.addExitSign(mesh);
         return mesh;
+    }
+
+    async _refreshSkylightDoors() {
+        for (const spec of Object.values(this.doors)) {
+            if (!spec.applySkyDoorGlow) continue;
+            const appearance = spec.resolveDoorAppearance();
+            const token = JSON.stringify(appearance);
+            if (token === JSON.stringify(spec.doorAppearance)) { spec.loadingSkyDoorState = null; continue; }
+            if (token === spec.loadingSkyDoorState) continue;
+            if (appearance.file === spec.doorAppearance.file) {
+                spec.loadingSkyDoorState = null;
+                spec.doorAppearance = appearance; spec.skyDoorState = appearance.state;
+                spec.applySkyDoorGlow(); continue;
+            }
+            spec.loadingSkyDoorState = token;
+            try {
+                const file = appearance.file;
+                const map = await this.app.textureLoader.loadAsync(roomAsset(file));
+                // A newer refresh can supersede this texture while it loads.
+                if (spec.loadingSkyDoorState !== token) { map.dispose(); continue; }
+                map.colorSpace = THREE.SRGBColorSpace;
+                map.magFilter = map.minFilter = THREE.NearestFilter;
+                const previous = spec.mesh.material.map;
+                spec.mesh.material.map = map;
+                spec.skyDoorState = appearance.state;
+                spec.doorAppearance = appearance;
+                spec.applySkyDoorGlow();
+                previous.dispose();
+            } catch (error) { console.error('Gallery entrance could not update:', error); }
+            finally { if (spec.loadingSkyDoorState === token) spec.loadingSkyDoorState = null; }
+        }
     }
 
     // Exit signs expose compact location details without moving the user to another room.
@@ -5867,7 +5965,10 @@ export const createRoomApp = ({ musicPath, musicVolume = 0.25, musicEntryChance 
         resolvedLookAtY = resolveLookAtY(viewHeightFromFloor, viewLookAtHeightFromFloor, viewFloorY);
         camera.position.y = resolvedCamY;
     };
+    let loopStarted = false;
     const startLoop = () => {
+        if (loopStarted) return;
+        loopStarted = true;
         let previousTime = performance.now();
         const loop = (time = performance.now()) => {
             const delta = Math.min(Math.max((time - previousTime) / 1000, 0), 0.1);
@@ -7099,6 +7200,78 @@ const COMPUTER_STYLES = `
     padding: 8px;
     border: 1px solid black;
 }
+
+/* Mobile reader: use the whole viewport and leave document scrolling to the iframe. */
+@media (max-width: 767px), (hover: none) and (pointer: coarse) {
+    #computer-document {
+        position: fixed;
+        inset: 0;
+        margin: 0;
+        width: 100%;
+        height: 100vh;
+        height: 100dvh;
+        max-width: none;
+        max-height: none;
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        background: black;
+        box-shadow: none;
+    }
+    #computer-document .document-frame {
+        display: block;
+        padding: 0;
+        border: 0;
+        background: black;
+    }
+    #computer-document .document-banner { display: contents; }
+    #computer-document .document-title { display: none; }
+    #computer-document .document-viewport,
+    #computer-document .document-clip {
+        box-sizing: border-box;
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        background: black;
+    }
+    #computer-document iframe {
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        background: white;
+        /* Neutralize source colors before inversion, avoiding the cyan/red cast. */
+        filter: grayscale(1) invert(1);
+    }
+    #computer-document .document-close {
+        position: absolute;
+        top: max(12px, env(safe-area-inset-top));
+        right: max(12px, env(safe-area-inset-right));
+        z-index: 2;
+    }
+    #computer-document .document-close button {
+        width: 44px;
+        height: 44px;
+        padding: 0;
+        border: 1px solid #ffb000;
+        border-radius: 4px;
+        background: black;
+        color: #ffb000;
+        font: 22px/1 Arial, sans-serif;
+        box-shadow: none;
+    }
+    #computer-document .document-close button:active {
+        padding: 0;
+        border: 1px solid #ffb000;
+        background: #241900;
+    }
+    #computer-document .document-close button:focus-visible {
+        outline: 1px solid #ffb000;
+        outline-offset: 3px;
+    }
+}
+
 `;
 const SKY_WORKSHOP_STYLES = `
 /* This workshop is used only by the archived test workshop. */

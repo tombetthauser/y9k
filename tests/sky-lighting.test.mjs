@@ -137,3 +137,29 @@ test('fixtures keep their pre-skylight unlit material unless explicitly opted in
         assert.equal(face.options.toneMapped, false);
     }
 });
+
+
+test('skylight gallery entrances follow destination electricity and California daylight', () => {
+    for (const period of ['day', 'dawn', 'evening', 'night']) {
+        assert.equal(helpers.galleryDoorState({ lightsOn: true, period }), 'bright');
+        assert.equal(helpers.galleryDoorState({ lightsOn: false, period }),
+            period === 'day' ? 'bright' : period === 'night' ? 'dark' : 'medium');
+    }
+});
+
+
+test('door texture overrides distinguish scenarios without applying experimental appearances', () => {
+    const context = { viewerHallway: false, viewerOn: false, viewerSkylight: false,
+        gallery: false, skylight: false, lightsOn: true, period: 'night', distinctGalleryDoors: false };
+    const key = helpers.doorScenarioKey(context);
+    assert.equal(key, 'from-gallery-off__to-hallway-on__night');
+    assert.equal(helpers.doorPresentation(context).file, 'images/door-1.jpg');
+    helpers.DOOR_TEXTURE_OVERRIDES[key] = { file: 'images/doors/custom.png', state: 'medium', glow: 0.3 };
+    try {
+        assert.equal(helpers.doorPresentation(context).file, 'images/doors/custom.png');
+        assert.equal(helpers.doorPresentation(context).glow, 0.3);
+        assert.equal(helpers.doorPresentation({ ...context, viewerOn: true }).file, 'images/door-1.jpg');
+    } finally { delete helpers.DOOR_TEXTURE_OVERRIDES[key]; }
+    assert.equal(helpers.doorPresentation({ ...context, gallery: true, skylight: true, lightsOn: false }).state, 'dark');
+    assert.equal(helpers.doorPresentation({ ...context, gallery: true, skylight: true }).state, 'bright');
+});

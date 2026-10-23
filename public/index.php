@@ -664,6 +664,7 @@
             const room = createRoom(data, {
                 persistence: storage,
                 rememberLights: true, // Per-browser room lighting and last-visit history.
+                deferSkylightRender: true, // Reveal only after the correct time-of-day preset is applied.
                 gallerySkylight: true, // Enable skylights; false restores solid ceilings in every gallery.
                 skylightChance: 65, // Percentage of galleries with skylights: 0–100; stable for each room ID.
                 skylightSeed: 'y9k-skylights-v5', // Change this to reshuffle which galleries have skylights.
@@ -741,7 +742,9 @@
                 }
 
                 if (!room.hallway && room.options.gallerySkylight) {
-                    await addSkyLighting(room, { computer }).catch(error => console.error('Sky lighting could not load:', error));
+                    await addSkyLighting(room, { computer });
+                    // No daytime frame is drawn while the selected sky and lighting load.
+                    room.app.startLoop();
                 }
 
                 // Delegation also covers controls added after an upload or placement update.
