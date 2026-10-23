@@ -1,14 +1,15 @@
 <?php
+// Archived outside public/; restore the page deliberately before using it again.
 // One version covers the portable component, its styles, and the assets it loads.
 $computerVersion = max(array_map('filemtime', array_merge(
-    [__DIR__ . '/computer.js', __DIR__ . '/computer.css', __DIR__ . '/computer-shadow.js'],
-    glob(__DIR__ . '/assets/rooms/models/computer-*.png'),
-    glob(__DIR__ . '/assets/rooms/audio/computer-*.wav')
+    [__DIR__ . '/../public/helpers.js'],
+    glob(__DIR__ . '/../public/assets/rooms/models/computer-*.png'),
+    glob(__DIR__ . '/../public/assets/rooms/audio/computer-*.wav')
 )));
 // Keep the test-only sky module and converted sky images fresh together.
 $skyVersion = max(array_map('filemtime', array_merge(
-    [__DIR__ . '/sky-workshop.js', __DIR__ . '/sky-workshop.css'],
-    glob(__DIR__ . '/assets/rooms/images/skies/*.png')
+    [__DIR__ . '/../public/helpers.js'],
+    glob(__DIR__ . '/../public/assets/rooms/images/skies/*.png')
 )));
 ?>
 <!DOCTYPE html>
@@ -79,8 +80,7 @@ $skyVersion = max(array_map('filemtime', array_merge(
 <body>
     <div id="stage"></div>
     <script type="module">
-        import { addSkyWorkshop } from './sky-workshop.js?v=<?= $skyVersion ?>';
-        import { createRoom, roomAsset, addComputer } from './helpers.js?v=<?= filemtime(__DIR__ . '/helpers.js') ?>';
+        import { GALLERY_LIGHTING_DEFAULTS, createRoom, roomAsset, addComputer, addSkyWorkshop } from '../public/helpers.js?v=<?= max($computerVersion, $skyVersion) ?>';
 
         const imageURLs = new Map();
 
@@ -110,12 +110,10 @@ $skyVersion = max(array_map('filemtime', array_merge(
             persistence,
             rememberLights: false, lightsOn: true,
             gallerySkylight: true, skylightChance: 100,
-            skylightWidth: 12, skylightThickness: 6,
+            ...GALLERY_LIGHTING_DEFAULTS,
+            ambientLight: 2.7, directionalLight: 0.55,
             skylightTreeLift: 82, skylightTreeWidth: 32,
             skylightTreeHeight: 15, skylightTreeDepth: 36,
-            skylightLightIntensity: 0.35, galleryFillIntensity: 68,
-            galleryFixtureOffColor: 0xffffff, galleryFixtureOffGlow: 0.9,
-            galleryOffEdgeColor: 0x757575,
             defaultFurnishings: false, distinctGalleryDoors: false,
             showRoomNumbers: false, roomEntryTransition: false,
             // Use static audio URLs so this page never needs index.php's asset route.
@@ -152,7 +150,7 @@ $skyVersion = max(array_map('filemtime', array_merge(
 
             await room.ready;
             // Test mode keeps hold-to-edit controls and existing browser settings.
-            const computer = await addComputer(room, { editor: true, assetVersion: <?= $computerVersion ?> })
+            const computer = await addComputer(room, { editor: true, shadowMolding: true, assetVersion: <?= $computerVersion ?> })
                 .catch(error => { console.error('Computer could not load:', error); return null; });
             // The gear and sky opening share one workshop, including the computer's off-state shadow.
             await addSkyWorkshop(room, { computer }).catch(error => console.error('Sky workshop could not load:', error));

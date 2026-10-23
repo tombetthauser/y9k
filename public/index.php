@@ -97,7 +97,7 @@
     $gallery = $doorsCount < 2;
 
     // Temporary room-to-computer assignments. Add another room ID and document URL here.
-    // Placement and lighting stay fixed in computer.js; database tracking can replace this map later.
+    // Placement and lighting are defined in helpers.js; database tracking can replace this map later.
     $roomComputers = [
         '0' => [
             'documentUrl' => 'https://docs.google.com/document/d/e/2PACX-1vS-NhUvNixeN_CbjA1c63Ukkwsz79cPiG48FbtImX9ZHTSywKDDJErJOwXP-vY_BJdD674UGCR4zHfs/pub?embedded=true',
@@ -107,7 +107,7 @@
     if ($computer !== null) {
         // Refresh the component, styles, and media together when any of them changes.
         $computer['assetVersion'] = max(array_map('filemtime', array_merge(
-            [__DIR__ . '/computer.js', __DIR__ . '/computer.css', __DIR__ . '/computer-shadow.js'],
+            [__DIR__ . '/helpers.js'],
             glob(__DIR__ . '/assets/rooms/models/computer-*.png'),
             glob(__DIR__ . '/assets/rooms/audio/computer-*.wav')
         )));
@@ -578,10 +578,11 @@
         <script type="module">
             // 3D setup - pass the room data to the reusable room helpers
             // A changed helper file gets a fresh URL so mobile browsers cannot reuse stale code.
-            import { createRoom, createRoomStorage, writeStoredViewFacing, roomAsset, addComputer } from <?= json_encode(
-                './helpers.js?v=' . filemtime(__DIR__ . '/helpers.js'),
+            import { GALLERY_LIGHTING_DEFAULTS, createRoom, createRoomStorage, writeStoredViewFacing, roomAsset, addComputer, addSkyLighting } from <?= json_encode(
+                './helpers.js?v=' . max(filemtime(__DIR__ . '/helpers.js'), $computer['assetVersion'] ?? 0),
                 JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
             ) ?>;
+
 
             const data = <?= json_encode(
                 [
@@ -666,39 +667,8 @@
                 gallerySkylight: true, // Enable skylights; false restores solid ceilings in every gallery.
                 skylightChance: 65, // Percentage of galleries with skylights: 0–100; stable for each room ID.
                 skylightSeed: 'y9k-skylights-v5', // Change this to reshuffle which galleries have skylights.
-                skylightWidth: 12, // Square opening width in feet; large enough to see from the fixed POV.
-                skylightThickness: 6, // Ceiling depth / vertical reveal in inches.
-                skylightLip: true, // Add trim around the bottom edge of the opening; false removes it.
-                skylightLipWidth: 1.5, // Trim width in inches, extending outward over the ceiling.
-                skylightLipThickness: 0.5, // Trim projects below the ceiling by this many inches.
-                skylightLipColor: 0xffffff, // White trim around the opening.
-                skylightEdgeColor: 0x666666, // Inside vertical corners with lights on.
-                skylightOffEdgeColor: 0x555555, // Inside vertical corners with lights off.
-                skylightLipEdgeColor: 0xd8d8d8, // Subtle lip outlines with lights on.
-                skylightLipOffEdgeColor: 0xc8c8c8, // Subtle lip outlines with lights off.
-                skylightDaylight: true, // Add daylight only while electric lights are off.
-                skylightLightIntensity: 0.35, // Even off-state daylight; lower makes point-light falloff more apparent.
-                skylightLightColor: 0xddeaff, // Soft blue-white daylight.
-
-                // Gallery lighting: additional fills apply only while electric lights are off.
-                galleryFillIntensity: 68, // Center point-light intensity while electric lights are off; 0 disables it.
-                galleryFillColor: 0xfff7ed,
-                galleryFillX: 0, // Inches east/west of the room center.
-                galleryFillZ: 0, // Inches north/south of the room center.
-                galleryFillHeight: 60, // Inches above the floor.
-                galleryFillRange: 24, // Maximum reach in feet; 0 means unlimited.
-                galleryFillDecay: 2, // Distance falloff; higher creates a more localized pool of light.
-                ...(data.gallery ? {
-                    ambientLight: 2.7, // Electric ambient intensity while on.
-                    directionalLight: 0.55, // Electric directional intensity while on.
-                } : {}),
-                galleryOffAmbientLight: 0.05, // Electric-light fallback while switched off.
-                galleryOffDirectionalLight: 0.04,
-                galleryFixtureBrightness: 1, // Glow of powered gallery fixture faces.
-                galleryFixtureOffColor: 0xffffff, // Bright unpowered diffuser surface.
-                galleryFixtureOffGlow: 0.9, // Gentle diffuser brightness only when electric lights are off.
-                galleryEdgeColor: 0xc4c4c8, // Edge lines with electric lights on; darker colors make stronger lines.
-                galleryOffEdgeColor: 0x757575, // Edge lines with electric lights off; 0x000000 = black, 0xffffff = white.
+                ...GALLERY_LIGHTING_DEFAULTS,
+                ...(data.gallery ? { ambientLight: 2.7, directionalLight: 0.55 } : {}),
 
                 skylightWind: roomAsset('audio/birds.mp3'), // The wind checkbox uses this track only in skylight rooms.
                 temporaryVolumeSliders: true, // Temporary live volume controls in room modals; false hides them.
@@ -763,10 +733,15 @@
             try {
                 await room.mount('#stage');
                 window.room = room;
+                let computer = null;
                 if (data.computer) {
                     // Normal mode uses fixed defaults and the document assigned to this room.
                     // A missing computer asset must not disable the gallery's image controls.
-                    await addComputer(room, data.computer).catch(error => console.error('Computer could not load:', error));
+                    computer = await addComputer(room, { ...data.computer, skyProfiles: true, shadowMolding: true }).catch(error => console.error('Computer could not load:', error));
+                }
+
+                if (!room.hallway && room.options.gallerySkylight) {
+                    await addSkyLighting(room, { computer }).catch(error => console.error('Sky lighting could not load:', error));
                 }
 
                 // Delegation also covers controls added after an upload or placement update.

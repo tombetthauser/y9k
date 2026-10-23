@@ -1,6 +1,7 @@
+import { helpers } from './helpers-module.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addNeutralComputerShadow } from '../public/computer-shadow.js';
+const { addNeutralComputerShadow } = helpers;
 
 test('neutral shadow multiplies RGB equally, with no colored-light subtraction', () => {
     const THREE = { Vector3: class {} };

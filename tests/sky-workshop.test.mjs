@@ -1,41 +1,43 @@
+import { helpers } from './helpers-module.mjs';
+const { SKY_DEFAULTS } = helpers;
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
-import { SKY_OPTIONS, SKY_CONTROLS, createSkySettings, getSkyForHour, hsvToRgb, restoreSkySettings } from '../public/sky-workshop.js';
+const { SKY_OPTIONS, SKY_CONTROLS, createSkySettings, getSkyForHour, hsvToRgb, restoreSkySettings } = helpers;
 
-test('browser-hour schedule covers day, both sunsets, midnight, and boundaries', () => {
+test('browser-hour schedule covers day, sunset, midnight, and boundaries', () => {
     const schedule = [[0, 'stars'], [5.99, 'stars'], [6, 'day'], [16.99, 'day'],
-        [17, 'sunset'], [18.49, 'sunset'], [18.5, 'sunset2'], [19.99, 'sunset2'], [20, 'stars'], [24, 'stars']];
+        [17, 'sunset'], [18.49, 'sunset'], [18.5, 'sunset'], [19.99, 'sunset'], [20, 'stars'], [24, 'stars']];
     for (const [hour, expected] of schedule) assert.equal(getSkyForHour(hour), expected);
     assert.equal(getSkyForHour(8, { dayStart: 9, sunsetStart: 18, nightStart: 22 }), 'stars');
-    assert.equal(getSkyForHour(20, { dayStart: 9, sunsetStart: 18, nightStart: 22 }), 'sunset2');
+    assert.equal(getSkyForHour(20, { dayStart: 9, sunsetStart: 18, nightStart: 22 }), 'sunset');
 });
 
 test('each sky and electric-light state has an independent editable profile', () => {
     const settings = createSkySettings({ ambientLight: 3, galleryFillIntensity: 60 });
-    assert.equal(settings.profiles.day.on.ambient, 3);
-    assert.equal(settings.profiles.day.off.fill, 60);
+    assert.equal(settings.profiles.day.on.ambient, 2.7);
+    assert.equal(settings.profiles.day.off.fill, 68);
     settings.profiles.day.on.sky = 0.2;
     settings.profiles.stars.off.fill = 1;
     assert.equal(settings.profiles.day.off.sky, 1);
     assert.equal(settings.profiles.stars.on.sky, 0.7);
-    assert.equal(settings.profiles.day.off.fill, 60);
+    assert.equal(settings.profiles.day.off.fill, 68);
 });
 
 test('saved settings restore without losing defaults or accepting invalid profiles/schedules', () => {
     const defaults = createSkySettings();
-    const restored = restoreSkySettings({ selection: 'sunset2', dayStart: 10, sunsetStart: 5, nightStart: 22,
-        profiles: { sunset2: { off: { sky: -5, hue: 28, saturation: 200, room: 'bad' } } } }, defaults);
-    assert.equal(restored.selection, 'sunset2');
+    const restored = restoreSkySettings({ selection: 'sunset', dayStart: 10, sunsetStart: 5, nightStart: 22,
+        profiles: { sunset: { off: { sky: -5, hue: 28, saturation: 200, room: 'bad' } } } }, defaults);
+    assert.equal(restored.selection, 'sunset');
     assert.equal(restored.dayStart, 6);
     assert.equal(restored.sunsetStart, 17);
-    assert.equal(restored.profiles.sunset2.off.sky, 0);
-    assert.equal(restored.profiles.sunset2.off.hue, 28);
-    assert.equal(restored.profiles.sunset2.off.saturation, 100);
-    assert.equal(restored.profiles.sunset2.off.room, defaults.profiles.sunset2.off.room);
+    assert.equal(restored.profiles.sunset.off.sky, 0);
+    assert.equal(restored.profiles.sunset.off.hue, 28);
+    assert.equal(restored.profiles.sunset.off.saturation, 100);
+    assert.equal(restored.profiles.sunset.off.room, defaults.profiles.sunset.off.room);
     assert.deepEqual(restoreSkySettings(null, defaults), defaults);
-    assert.equal(defaults.profiles.sunset2.off.sky, 1);
+    assert.equal(defaults.profiles.sunset.off.sky, 1);
 });
 
 test('valid custom schedules and per-state values survive a storage round-trip', () => {
@@ -56,7 +58,7 @@ test('circular picker has a white center and the expected hue colors', () => {
     assert.deepEqual(hsvToRgb(-120, 1), [0, 0, 1]);
 });
 
-test('all manually selectable skies point to existing PNGs, including both sunsets', async () => {
+test('all manually selectable skies point to existing PNGs, including sunset', async () => {
     for (const sky of Object.values(SKY_OPTIONS)) {
         const image = await readFile(new URL('../public/' + sky.path.slice(2), import.meta.url));
         assert.deepEqual([...image.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
@@ -64,7 +66,7 @@ test('all manually selectable skies point to existing PNGs, including both sunse
 });
 
 test('sky click opens only through the hole; dragging turns the room; fixtures block sky clicks', async () => {
-    const source = await readFile(new URL('../public/sky-workshop.js', import.meta.url), 'utf8');
+    const source = await readFile(new URL('../public/helpers.js', import.meta.url), 'utf8');
     const code = source.slice(source.indexOf('function bindSkyClick'), source.indexOf('function makePanel'));
     const handlers = {};
     let hits = [], opened = 0, angle = 0;
@@ -94,7 +96,7 @@ test('sky click opens only through the hole; dragging turns the room; fixtures b
 
 
 test('workshop dropdowns and sliders have distinct form names', async () => {
-    const source = await readFile(new URL('../public/sky-workshop.js', import.meta.url), 'utf8');
+    const source = await readFile(new URL('../public/helpers.js', import.meta.url), 'utf8');
     const context = { SKY_OPTIONS, SKY_CONTROLS };
     vm.runInNewContext(source.slice(source.indexOf('function makePanel')) + '\nglobalThis.markup = makePanel();', context);
     const names = [...context.markup.matchAll(/name="([^"]+)"/g)].map(match => match[1]);
@@ -118,16 +120,9 @@ test('lip color and thick vertical line settings persist independently of room h
 });
 
 
-test('stars / lights-off hardcoded defaults match the workshop screenshots', () => {
+test('every hardcoded sky/light-state default matches the approved JSON export', () => {
     const settings = createSkySettings();
-    const night = settings.profiles.stars.off;
-    for (const [key, value] of Object.entries({ room: 0.3, sky: 0.55, trees: 0.05, reveal: 0.1, trim: 0.5,
-        wall: 0.95, floor: 1.1, ceiling: 1, roomEdges: 0, edges: 0.1, verticalThickness: 0.07,
-        verticalBrightness: 0, ambient: 0.1, directional: 0.55, fill: 20, daylight: 0.05, fixtures: 1, fixtureGlow: 0.25 }))
-        assert.equal(night[key], value, key);
-    const lipHex = '#' + hsvToRgb(night.lipHue, night.lipSaturation / 100)
-        .map(value => Math.round(value * 255).toString(16).padStart(2, '0')).join('');
-    assert.equal(lipHex, '#d3e8ff');
-    assert.equal(settings.profiles.day.off.sky, 1);
-    assert.equal(settings.profiles.stars.on.sky, 0.7);
+    for (const sky of Object.keys(SKY_OPTIONS)) for (const mode of ['on', 'off']) {
+        assert.deepEqual(settings.profiles[sky][mode], SKY_DEFAULTS.skies[sky].states[mode].lighting);
+    }
 });

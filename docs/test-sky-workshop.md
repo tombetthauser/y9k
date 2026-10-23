@@ -1,6 +1,6 @@
 # Test-room sky workshop
 
-Open `public/test.php` in the browser and click the gear icon or the sky through the skylight. Dragging across the
+The test page is archived at `tests/test.php` outside the public directory. Once deliberately restored, open it in the browser and click the gear icon or the sky through the skylight. Dragging across the
 opening still turns the room; a click on a fixture or the lip does not open the sky editor.
 This workshop is initialized only in the test page.
 
@@ -45,32 +45,39 @@ arrow keys. Light tint multiplies the room's original light colors, retaining th
 fill / blue skylight at zero saturation.
 
 Settings save only in browser local storage, under `y9k-test-sky-workshop-v1`. The Restore button
-resets both light states for the currently displayed sky. It leaves the other skies and schedule
+resets both light states and the computer for the currently displayed sky. It leaves other skies and the schedule
 alone. Computer placement, brightness, audio, and neutral-darkening profiles remain managed by the
 computer component.
 
-The workshop also includes a Computer shadow · Stars 1 / lights off section with X/Y/Z offsets, reach,
-strength, and falloff. These edit a separate `starsOff` profile that applies only when Stars 1 is the active sky and
-electric lights are off. Other skies keep the regular on/off shadows. The preview button selects
-stars and turns the lights off. The nighttime shadow defaults are reach 35 inches, strength 0.1,
-falloff 0.4, and X/Y/Z offsets 8.6 / 2.2 / 1.9 inches.
+The workshop also includes a Computer shadow section for the selected sky and current electric-light
+state. Controls switch immediately when the sky or actual light state changes. Stars/off retains
+its special starter shadow; all other sky states start from the standard on/off defaults.
+
+All test-computer settings now save under `y9k-test-computer-sky-v1:<sky>`: placement, on/off
+brightness and shadows, the special Stars/off shadow, screen-light settings and color, sound
+volumes, auto-rotation, and preview state. The initially selected sky can inherit previous tuning
+if it has no saved settings yet. Other new skies start at the hardcoded defaults. The color-picker
+target is also remembered separately for each sky in the workshop settings.
+
+Restore this sky's defaults resets both room-light profiles and all computer settings for only
+the selected sky. The schedule, selected sky, and other skies' saved settings stay intact. The
+computer's own Restore defaults button resets only that sky's computer settings.
 
 The Computer screen light section has enable/disable, intensity, size/reach, falloff, and local
 X/Y/Z offsets. Positive Z is in front of the computer, and offsets follow its rotation. The light
 illuminates the computer face and surrounding surfaces starting at boot frame 2 (the Windows logo), then switches off
 at shutdown-3 (the safe-to-turn-off image). The temporary Preview checkbox allows tuning while idle.
-The screen color uses the shared picker with Computer screen light selected. Settings persist
-under `y9k-test-computer-screen-light-v1`; preview does not persist.
+The screen color uses the shared picker with Computer screen light selected. Settings and the preview checkbox persist in the selected sky's computer settings set.
 
 The computer shadow uses neutral multiplicative surface darkening rather than a negative light,
 avoiding hue shifts when the room light color changes.
 
 ## Code
 
-- `public/sky-workshop.js`: sky selection, browser schedule, profiles, picker, light/material updates,
+- `public/helpers.js`: sky selection, browser schedule, profiles, picker, light/material updates,
   and picking the sky opening.
-- `public/sky-workshop.css`: scoped yellow editor styles.
-- `public/test.php`: initialization and cache version for the module and converted assets.
+- `public/helpers.js`: scoped yellow editor styles.
+- `tests/test.php`: initialization and cache version for the module and converted assets.
 - `public/helpers.js`: exposes the existing tree material / outdoor group and a promise for the
   original sky texture. Main rooms keep their existing sky behavior.
 
@@ -84,3 +91,23 @@ vertical line thickness 0.07 inches and brightness 0, ambient 0.1, directional 0
 center fill 20, daylight 0.05, fixture glow 0.25. Lip color is #d3e8ff.
 The screen light defaults to intensity 2.9, reach 36 inches, falloff 2.1, local X/Y/Z 0 / 27 / 9.6,
 and hue 229 / saturation 30 percent.
+
+### Independent sky and light-state settings
+
+The test computer now stores a complete settings snapshot for each of the eight sky/light-state combinations under `y9k-test-computer-sky-v2:<sky>:<on|off>`. Placement, rotation, brightness, shadow, screen light, preview and sound volumes all switch with the sky and actual light state, including flicker. Existing per-sky saves seed each new state once. Both restore buttons reset only the current sky/light-state slot. Room workshop profiles and color-picker targets are also separate by sky and light state; the automatic schedule remains global.
+
+`GALLERY_LIGHTING_DEFAULTS` in `public/helpers.js` supplies the production gallery values to both index.php and test.php. Computer starter values come from the same `COMPUTER_DEFAULTS` used in production. Explicit sunset and stars workshop presets remain in place because production has no corresponding time-of-day presets. Saved browser overrides remain until reset.
+
+### Live California sky system
+
+The approved six-state export is now hardcoded in `public/helpers.js`. It supplies test-room reset defaults and live lighting/computer profiles. Existing test browser overrides remain local; production never reads them.
+
+`public/helpers.js` applies these surfaces only in galleries with an actual skylight. It follows California time (`America/Los_Angeles`, including DST) and seasonal Sacramento sunrise/sunset estimates from `public/helpers.js`. Dawn runs from 30 minutes before sunrise to 30 minutes after; evening runs from 30 minutes before sunset to 30 minutes after. Both use the sunset preset. Day fills the interval between them, and night uses stars. The room configuration panel offers Automatic, Day, Dawn, Evening and Night; manual selection lasts for the current page visit. Every actual light-switch flicker applies the matching on/off profile.
+
+Computers opt into these profiles through `skyProfiles: true`. Their boot/shutdown stages, beep and screen-light gating are unchanged. In enclosed galleries or hallways, only the computer changes: day/on when room lights are on, stars/off when off. Native room lighting stays intact. Baseboard shadows are enabled for live computers as well as the test computer. Production retains its existing camera rotation behavior and room-to-computer assignments.
+
+### Consolidated file layout
+
+All computer and sky code, approved defaults, California timing, shadow shader, modal markup, and scoped styles now live in `public/helpers.js`. `public/index.php` imports `addComputer` and `addSkyLighting` directly from that file. There are no separate computer/sky implementation or stylesheet files. Media assets remain in `public/assets/rooms/` at their existing URLs.
+
+The optional workshop functions are also in helpers.js, but production does not initialize them. The test page is archived at `tests/test.php`; it is not a public entry point. Automated tests import the consolidated helper through a Node-only adapter that stubs the external Three.js import, while the scene integration tests provide their own Three.js fixtures.

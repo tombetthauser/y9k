@@ -1,5 +1,36 @@
 import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
 
+// Production gallery defaults also seed the test workshop. Keep both rooms in sync here.
+export const GALLERY_LIGHTING_DEFAULTS = Object.freeze({
+    skylightWidth: 12,
+    skylightThickness: 6,
+    skylightLip: true,
+    skylightLipWidth: 1.5,
+    skylightLipThickness: 0.5,
+    skylightLipColor: 0xffffff,
+    skylightEdgeColor: 0x666666,
+    skylightOffEdgeColor: 0x555555,
+    skylightLipEdgeColor: 0xd8d8d8,
+    skylightLipOffEdgeColor: 0xc8c8c8,
+    skylightDaylight: true,
+    skylightLightIntensity: 0.35,
+    skylightLightColor: 0xddeaff,
+    galleryFillIntensity: 68,
+    galleryFillColor: 0xfff7ed,
+    galleryFillX: 0,
+    galleryFillZ: 0,
+    galleryFillHeight: 60,
+    galleryFillRange: 24,
+    galleryFillDecay: 2,
+    galleryOffAmbientLight: 0.05,
+    galleryOffDirectionalLight: 0.04,
+    galleryFixtureBrightness: 1,
+    galleryFixtureOffColor: 0xffffff,
+    galleryFixtureOffGlow: 0.9,
+    galleryEdgeColor: 0xc4c4c8,
+    galleryOffEdgeColor: 0x757575,
+});
+
 export const roomAsset = (path) => {
     if (path.startsWith("images/") || path.startsWith("audio/"))
         return new URL("./assets/rooms/" + path, import.meta.url).href;
@@ -69,16 +100,6 @@ export const createRoom = (data = {}, options = {}) => {
     if (gallery)
         room.addImages(data.images ?? [], { stored: true });
     return room;
-};
-
-// Load the self-contained computer only in rooms that request one.
-// Its module owns the viewer, scene objects, sounds, and optional test controls.
-export const addComputer = async (room, { assetVersion, ...options } = {}) => {
-    const url = new URL('./computer.js', import.meta.url);
-    const version = assetVersion ?? new URL(import.meta.url).searchParams.get('v');
-    if (version != null) url.searchParams.set('v', String(version));
-    const component = await import(url.href);
-    return component.addComputer(room, options);
 };
 
 export const createRoomStorage = (id, { endpoint = "index.php", onChange = () => { } } = {}) => {
@@ -306,6 +327,16 @@ export class Room {
         };
         if (!hallway)
             this.options.gallerySkylight = galleryHasSkylight(this.options.roomId, this.options);
+        if (!hallway && !this.options.gallerySkylight) {
+            // Enclosed galleries keep their original dark lights-off appearance.
+            // The brighter fill, diffuser glow and edge colors belong to skylight rooms only.
+            Object.assign(this.options, {
+                galleryFillIntensity: 0,
+                galleryFixtureOffColor: FIXTURE_OFF_COLOR,
+                galleryFixtureOffGlow: 0,
+                galleryOffEdgeColor: 0x111111,
+            });
+        }
         // Saved browser volumes override code defaults before any room audio starts.
         for (const key of ["windVolume", "skylightWindVolume", "backgroundMusicVolume", "lightBuzzVolume",
             "lightSwitchVolume", "lightboxSfxVolume", "stepVolume", "doorOpenVolume", "doorSfxVolume",
@@ -507,7 +538,8 @@ export class Room {
         if (!this.hallway && o.gallerySkylight) this._addSkylightOutside();
         this.materials = materials;
         this._factories = this.app.createPropFactories({ ...this.layout, doorHeight: inchesToWorld(o.doorHeight) });
-        this._factories.addLightFixture = createAddLightFixture({ scene, textureLoader, ...this.layout, roomLights });
+        this._factories.addLightFixture = createAddLightFixture({ scene, textureLoader, ...this.layout, roomLights,
+            reactiveFace: !this.hallway && o.gallerySkylight });
         for (const [wall, door] of Object.entries(this.doors))
             await this._createDoor(wall, door);
         if (this.hallway)
@@ -785,6 +817,7 @@ export class Room {
 
     // Every panel shares the same saved audio preference and updates immediately when it changes.
     _addAudioToggle(panel) {
+        this.skyLighting?.addControls(panel);
         if (!panel || panel.querySelector("[data-room-audio]")) return;
         const label = document.createElement("label");
         label.dataset.roomAudio = "";
@@ -2723,6 +2756,8 @@ export const addHallMolding = (scene, outline, roomHeight, color = MOLDING_COLOR
         crown.rotation.y = rotY;
         scene.add(crown);
     }
+    // Expose the shared trim material for optional room-specific surface effects.
+    return mat;
 };
 
 const DRAG_THRESHOLD = 4;
@@ -3558,7 +3593,7 @@ const HOUSING_COLOR = 0xb0b0b0;
 
 const DROP_FROM_CEILING = 0.02;
 
-export const createAddLightFixture = ({ scene, textureLoader, roomHalfY, ceilingY = roomHalfY, roomLights = null, }) => {
+export const createAddLightFixture = ({ scene, textureLoader, roomHalfY, ceilingY = roomHalfY, roomLights = null, reactiveFace = false, }) => {
     return (x, z, rotationY = 0, { isOn = false, scale = 1, length, width } = {}) => {
         textureLoader.load(LIGHT_IMAGE, (tex) => {
             tex.colorSpace = THREE.SRGBColorSpace;
@@ -3570,16 +3605,19 @@ export const createAddLightFixture = ({ scene, textureLoader, roomHalfY, ceiling
             const housing = new THREE.MeshStandardMaterial({
                 color: HOUSING_COLOR,
             });
-            const face = new THREE.MeshStandardMaterial({
+            // Only skylight galleries need light-reactive diffuser faces.
+            const face = reactiveFace ? new THREE.MeshStandardMaterial({
                 map: tex,
                 emissiveMap: tex,
                 emissive: 0x000000,
                 roughness: 0.85,
                 toneMapped: false,
-            });
+            }) : new THREE.MeshBasicMaterial({ map: tex, toneMapped: false });
             const lit = roomLights ? roomLights.isOn() : isOn;
-            if (lit)
-                face.emissive.setRGB(...FIXTURE_ON_RGB);
+            if (lit) {
+                if (face.emissive) face.emissive.setRGB(...FIXTURE_ON_RGB);
+                else face.color.setRGB(...FIXTURE_ON_RGB);
+            }
             else
                 face.color.set(FIXTURE_OFF_COLOR);
             const box = new THREE.Mesh(new THREE.BoxGeometry(len, depth, wid), [housing, housing, housing, face, housing, housing]);
@@ -3984,9 +4022,10 @@ export const createRoomLayout = ({ scene, outline, height = DEFAULT_ROOM_HEIGHT,
             addEdges(verticalPoints, "skylight-vertical-lines", skylight.edgeColor ?? color, skylight.offEdgeColor ?? offLineColor);
         }
     }
+    let moldingMaterial = null;
     if (molding !== false) {
         const color = typeof molding === "number" ? molding : undefined;
-        addHallMolding(scene, outline, roomHeight, color, floorY);
+        moldingMaterial = addHallMolding(scene, outline, roomHeight, color, floorY);
     }
     const bounds = outlineBounds(outline);
     const walls = wallsFromOutline(outline, wallInset);
@@ -3999,6 +4038,7 @@ export const createRoomLayout = ({ scene, outline, height = DEFAULT_ROOM_HEIGHT,
         floor,
         ceiling,
         skylightLip,
+        moldingMaterial,
         wallMeshes,
         bounds,
         walls,
@@ -6301,3 +6341,2163 @@ body.is-windowed #lightbox img {
 }
 
 `;
+
+// Consolidated computer and sky system: data, timing, rendering, and optional workshop.
+// Approved workshop export. Shared starter values for live rooms and test-room resets.
+export const SKY_DEFAULTS = {
+  "version": 1,
+  "selection": "sunset",
+  "schedule": {
+    "dayStart": 6,
+    "sunsetStart": 17,
+    "nightStart": 20
+  },
+  "skies": {
+    "day": {
+      "label": "Current day sky",
+      "skyImage": "./assets/rooms/images/static_images/windows.png",
+      "states": {
+        "on": {
+          "lightsOn": true,
+          "colorTarget": "room",
+          "lighting": {
+            "room": 1,
+            "sky": 1,
+            "trees": 1,
+            "reveal": 0.95,
+            "trim": 1,
+            "wall": 1,
+            "floor": 1,
+            "ceiling": 1,
+            "roomEdges": 1,
+            "edges": 0.345,
+            "verticalThickness": 0.12,
+            "verticalBrightness": 0.845,
+            "bandHue": 0,
+            "bandSaturation": 0,
+            "bandValue": 1,
+            "lipBand": 1,
+            "value": 1,
+            "lipValue": 1,
+            "lipBottom": 1.01,
+            "bottomHue": 0,
+            "bottomSaturation": 0,
+            "bottomValue": 1,
+            "hue": 0,
+            "saturation": 0,
+            "lipHue": 0,
+            "lipSaturation": 0,
+            "fixtures": 1,
+            "ambient": 2.7,
+            "directional": 0.55,
+            "fill": 0,
+            "daylight": 0,
+            "fixtureGlow": 1
+          },
+          "computer": {
+            "placement": {
+              "width": 31.7,
+              "rotation": 322,
+              "x": 85,
+              "y": 0.1,
+              "z": 16.5
+            },
+            "lighting": {
+              "shadowX": 11.6,
+              "shadowY": -10.28,
+              "shadowZ": 1.9,
+              "shadowReach": 34,
+              "shadowStrength": 1.47,
+              "shadowDecay": 3.71,
+              "shadowMoldingStrength": 1,
+              "computerBrightness": 1.15
+            },
+            "screenLight": {
+              "enabled": true,
+              "intensity": 2.9,
+              "reach": 36,
+              "decay": 2.1,
+              "x": 0,
+              "y": 27,
+              "z": 9.6,
+              "hue": 229,
+              "saturation": 30
+            },
+            "volumes": {
+              "startup": 0.11,
+              "shutdown": 0.06
+            },
+            "autoRotation": true,
+            "screenLightPreview": false,
+            "documentUrl": "https://docs.google.com/document/d/e/2PACX-1vS-NhUvNixeN_CbjA1c63Ukkwsz79cPiG48FbtImX9ZHTSywKDDJErJOwXP-vY_BJdD674UGCR4zHfs/pub?embedded=true"
+          }
+        },
+        "off": {
+          "lightsOn": false,
+          "colorTarget": "room",
+          "lighting": {
+            "room": 1,
+            "sky": 1,
+            "trees": 1,
+            "reveal": 1,
+            "trim": 1,
+            "wall": 1,
+            "floor": 1,
+            "ceiling": 1,
+            "roomEdges": 1,
+            "edges": 1,
+            "verticalThickness": 0.12,
+            "verticalBrightness": 1,
+            "bandHue": 0,
+            "bandSaturation": 0,
+            "bandValue": 1,
+            "lipBand": 1,
+            "value": 1,
+            "lipValue": 1,
+            "lipBottom": 1,
+            "bottomHue": 0,
+            "bottomSaturation": 0,
+            "bottomValue": 1,
+            "hue": 0,
+            "saturation": 0,
+            "lipHue": 0,
+            "lipSaturation": 0,
+            "fixtures": 1,
+            "ambient": 0.05,
+            "directional": 0.04,
+            "fill": 68,
+            "daylight": 0.35,
+            "fixtureGlow": 0.9
+          },
+          "computer": {
+            "placement": {
+              "width": 31.7,
+              "rotation": 322,
+              "x": 85,
+              "y": 0.1,
+              "z": 16.5
+            },
+            "lighting": {
+              "shadowX": 8.6,
+              "shadowY": -12.76,
+              "shadowZ": 1.9,
+              "shadowReach": 37,
+              "shadowStrength": 1.6,
+              "shadowDecay": 2.4,
+              "shadowMoldingStrength": 1,
+              "computerBrightness": 1
+            },
+            "screenLight": {
+              "enabled": true,
+              "intensity": 4.21,
+              "reach": 36,
+              "decay": 2.1,
+              "x": 0,
+              "y": 26.52,
+              "z": 9.6,
+              "hue": 229,
+              "saturation": 30
+            },
+            "volumes": {
+              "startup": 0.11,
+              "shutdown": 0.06
+            },
+            "autoRotation": true,
+            "screenLightPreview": false,
+            "documentUrl": "https://docs.google.com/document/d/e/2PACX-1vS-NhUvNixeN_CbjA1c63Ukkwsz79cPiG48FbtImX9ZHTSywKDDJErJOwXP-vY_BJdD674UGCR4zHfs/pub?embedded=true"
+          }
+        }
+      }
+    },
+    "stars": {
+      "label": "Stars 1",
+      "skyImage": "./assets/rooms/images/skies/stars-1.png",
+      "states": {
+        "on": {
+          "lightsOn": true,
+          "colorTarget": "room",
+          "lighting": {
+            "room": 1,
+            "sky": 0.7,
+            "trees": 0.15,
+            "reveal": 0.555,
+            "trim": 1,
+            "wall": 1,
+            "floor": 1,
+            "ceiling": 1,
+            "roomEdges": 1,
+            "edges": 1,
+            "verticalThickness": 0.12,
+            "verticalBrightness": 1,
+            "bandHue": 0,
+            "bandSaturation": 0,
+            "bandValue": 1,
+            "lipBand": 1,
+            "value": 1,
+            "lipValue": 1,
+            "lipBottom": 1,
+            "bottomHue": 0,
+            "bottomSaturation": 0,
+            "bottomValue": 1,
+            "hue": 0,
+            "saturation": 0,
+            "lipHue": 0,
+            "lipSaturation": 0,
+            "fixtures": 1,
+            "ambient": 2.7,
+            "directional": 0.55,
+            "fill": 0,
+            "daylight": 0,
+            "fixtureGlow": 1
+          },
+          "computer": {
+            "placement": {
+              "width": 31.7,
+              "rotation": 322,
+              "x": 85,
+              "y": 0.1,
+              "z": 16.5
+            },
+            "lighting": {
+              "shadowX": 15.9,
+              "shadowY": -10,
+              "shadowZ": -4.4,
+              "shadowReach": 31,
+              "shadowStrength": 2.1,
+              "shadowDecay": 3.1,
+              "shadowMoldingStrength": 1,
+              "computerBrightness": 1.15
+            },
+            "screenLight": {
+              "enabled": true,
+              "intensity": 2.9,
+              "reach": 36,
+              "decay": 2.1,
+              "x": 0,
+              "y": 27,
+              "z": 9.6,
+              "hue": 229.11060322861283,
+              "saturation": 29.958870558902728
+            },
+            "volumes": {
+              "startup": 0.11,
+              "shutdown": 0.06
+            },
+            "autoRotation": false,
+            "screenLightPreview": false,
+            "documentUrl": "https://docs.google.com/document/d/e/2PACX-1vS-NhUvNixeN_CbjA1c63Ukkwsz79cPiG48FbtImX9ZHTSywKDDJErJOwXP-vY_BJdD674UGCR4zHfs/pub?embedded=true"
+          }
+        },
+        "off": {
+          "lightsOn": false,
+          "colorTarget": "room",
+          "lighting": {
+            "room": 0.25,
+            "sky": 0.55,
+            "trees": 0.045,
+            "reveal": 0.08,
+            "trim": 0.5,
+            "wall": 0.75,
+            "floor": 1.1,
+            "ceiling": 1,
+            "roomEdges": 0,
+            "edges": 0.1,
+            "verticalThickness": 0.07,
+            "verticalBrightness": 0,
+            "bandHue": 0,
+            "bandSaturation": 0,
+            "bandValue": 1,
+            "lipBand": 1,
+            "value": 1,
+            "lipValue": 1,
+            "lipBottom": 1,
+            "bottomHue": 0,
+            "bottomSaturation": 0,
+            "bottomValue": 1,
+            "hue": 215,
+            "saturation": 20,
+            "lipHue": 211.363636,
+            "lipSaturation": 17.254902,
+            "fixtures": 1,
+            "ambient": 0.1,
+            "directional": 0.55,
+            "fill": 20,
+            "daylight": 0.05,
+            "fixtureGlow": 0.25
+          },
+          "computer": {
+            "placement": {
+              "width": 31.7,
+              "rotation": 322,
+              "x": 85,
+              "y": 0.1,
+              "z": 16.5
+            },
+            "lighting": {
+              "shadowX": 8.6,
+              "shadowY": -3,
+              "shadowZ": 1.9,
+              "shadowReach": 35,
+              "shadowStrength": 0.9,
+              "shadowDecay": 2,
+              "shadowMoldingStrength": 1,
+              "computerBrightness": 1
+            },
+            "screenLight": {
+              "enabled": true,
+              "intensity": 2.9,
+              "reach": 36,
+              "decay": 2.1,
+              "x": 0,
+              "y": 27,
+              "z": 9.6,
+              "hue": 229,
+              "saturation": 30
+            },
+            "volumes": {
+              "startup": 0.11,
+              "shutdown": 0.06
+            },
+            "autoRotation": true,
+            "screenLightPreview": false,
+            "documentUrl": "https://docs.google.com/document/d/e/2PACX-1vS-NhUvNixeN_CbjA1c63Ukkwsz79cPiG48FbtImX9ZHTSywKDDJErJOwXP-vY_BJdD674UGCR4zHfs/pub?embedded=true"
+          }
+        }
+      }
+    },
+    "sunset": {
+      "label": "Doom sunset",
+      "skyImage": "./assets/rooms/images/skies/doom-sunset.png",
+      "states": {
+        "on": {
+          "lightsOn": true,
+          "colorTarget": "band",
+          "lighting": {
+            "room": 1,
+            "sky": 0.8,
+            "trees": 0.115,
+            "reveal": 0.57,
+            "trim": 1,
+            "wall": 1,
+            "floor": 1,
+            "ceiling": 1,
+            "roomEdges": 1,
+            "edges": 1,
+            "verticalThickness": 0.12,
+            "verticalBrightness": 1,
+            "bandHue": 232.30909096900803,
+            "bandSaturation": 11.630825950395185,
+            "bandValue": 1,
+            "lipBand": 1.14,
+            "value": 1,
+            "lipValue": 1,
+            "lipBottom": 0.905,
+            "bottomHue": 209.42728447788184,
+            "bottomSaturation": 11.608898672511804,
+            "bottomValue": 1,
+            "hue": 0,
+            "saturation": 0,
+            "lipHue": 8.784096819017407,
+            "lipSaturation": 8.488455010499553,
+            "fixtures": 1,
+            "ambient": 2.7,
+            "directional": 0.55,
+            "fill": 0,
+            "daylight": 0,
+            "fixtureGlow": 1
+          },
+          "computer": {
+            "placement": {
+              "width": 31.7,
+              "rotation": 322,
+              "x": 85,
+              "y": 0.1,
+              "z": 16.5
+            },
+            "lighting": {
+              "shadowX": 9.12,
+              "shadowY": -14.75,
+              "shadowZ": 1.9,
+              "shadowReach": 33.5,
+              "shadowStrength": 1.72,
+              "shadowDecay": 2.45,
+              "shadowMoldingStrength": 1,
+              "computerBrightness": 1.15
+            },
+            "screenLight": {
+              "enabled": true,
+              "intensity": 2.9,
+              "reach": 36,
+              "decay": 2.1,
+              "x": 0,
+              "y": 27,
+              "z": 9.6,
+              "hue": 229,
+              "saturation": 30
+            },
+            "volumes": {
+              "startup": 0.11,
+              "shutdown": 0.06
+            },
+            "autoRotation": true,
+            "screenLightPreview": false,
+            "documentUrl": "https://docs.google.com/document/d/e/2PACX-1vS-NhUvNixeN_CbjA1c63Ukkwsz79cPiG48FbtImX9ZHTSywKDDJErJOwXP-vY_BJdD674UGCR4zHfs/pub?embedded=true"
+          }
+        },
+        "off": {
+          "lightsOn": false,
+          "colorTarget": "bottom",
+          "lighting": {
+            "room": 0.75,
+            "sky": 1,
+            "trees": 0.05,
+            "reveal": 0.535,
+            "trim": 1,
+            "wall": 1,
+            "floor": 1,
+            "ceiling": 1,
+            "roomEdges": 0.4,
+            "edges": 0.15,
+            "verticalThickness": 0.12,
+            "verticalBrightness": 1,
+            "bandHue": 216.8590340708884,
+            "bandSaturation": 19.511118921677014,
+            "bandValue": 1,
+            "lipBand": 1.545,
+            "value": 1,
+            "lipValue": 1,
+            "lipBottom": 1.255,
+            "bottomHue": 192.4052765415244,
+            "bottomSaturation": 19.567970950062815,
+            "bottomValue": 1,
+            "hue": 28,
+            "saturation": 30,
+            "lipHue": 21.64205463679241,
+            "lipSaturation": 19.78351036659495,
+            "fixtures": 1,
+            "ambient": 0.05,
+            "directional": 0.04,
+            "fill": 68,
+            "daylight": 0.2,
+            "fixtureGlow": 0.9
+          },
+          "computer": {
+            "placement": {
+              "width": 31.7,
+              "rotation": 322,
+              "x": 85,
+              "y": 0.1,
+              "z": 16.5
+            },
+            "lighting": {
+              "shadowX": 8.6,
+              "shadowY": -7.8,
+              "shadowZ": 1.9,
+              "shadowReach": 32,
+              "shadowStrength": 1.7,
+              "shadowDecay": 2.3,
+              "shadowMoldingStrength": 1,
+              "computerBrightness": 1
+            },
+            "screenLight": {
+              "enabled": true,
+              "intensity": 2.9,
+              "reach": 36,
+              "decay": 2.1,
+              "x": 0,
+              "y": 27,
+              "z": 9.6,
+              "hue": 229,
+              "saturation": 30
+            },
+            "volumes": {
+              "startup": 0.11,
+              "shutdown": 0.06
+            },
+            "autoRotation": true,
+            "screenLightPreview": false,
+            "documentUrl": "https://docs.google.com/document/d/e/2PACX-1vS-NhUvNixeN_CbjA1c63Ukkwsz79cPiG48FbtImX9ZHTSywKDDJErJOwXP-vY_BJdD674UGCR4zHfs/pub?embedded=true"
+          }
+        }
+      }
+    }
+  }
+};
+
+// California uses the same clock throughout the state, including daylight-saving changes.
+export const CALIFORNIA_SKY_LOCATION = Object.freeze({ latitude: 38.5816, longitude: -121.4944, timeZone: 'America/Los_Angeles' });
+const radians = degrees => degrees * Math.PI / 180;
+
+export function californiaDateParts(now = new Date()) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: CALIFORNIA_SKY_LOCATION.timeZone, year: 'numeric', month: 'numeric', day: 'numeric',
+        hour: 'numeric', minute: 'numeric', second: 'numeric', hourCycle: 'h23',
+    }).formatToParts(now);
+    return Object.fromEntries(parts.filter(part => part.type !== 'literal').map(part => [part.type, Number(part.value)]));
+}
+
+// NOAA's approximate solar equations give seasonal sunrise/sunset without network requests.
+// Reference: https://gml.noaa.gov/grad/solcalc/solareqns.PDF
+export function californiaSunTimes(now = new Date(), location = CALIFORNIA_SKY_LOCATION) {
+    const date = californiaDateParts(now);
+    const noonUTC = Date.UTC(date.year, date.month - 1, date.day, 12);
+    const dayOfYear = Math.floor((noonUTC - Date.UTC(date.year, 0, 1)) / 86400000) + 1;
+    const daysInYear = (Date.UTC(date.year + 1, 0, 1) - Date.UTC(date.year, 0, 1)) / 86400000;
+    const angle = 2 * Math.PI / daysInYear * (dayOfYear - 1);
+    const equation = 229.18 * (0.000075 + 0.001868 * Math.cos(angle) - 0.032077 * Math.sin(angle)
+        - 0.014615 * Math.cos(2 * angle) - 0.040849 * Math.sin(2 * angle));
+    const declination = 0.006918 - 0.399912 * Math.cos(angle) + 0.070257 * Math.sin(angle)
+        - 0.006758 * Math.cos(2 * angle) + 0.000907 * Math.sin(2 * angle)
+        - 0.002697 * Math.cos(3 * angle) + 0.00148 * Math.sin(3 * angle);
+    const latitude = radians(location.latitude);
+    const hourAngle = Math.acos(Math.cos(radians(90.833)) / (Math.cos(latitude) * Math.cos(declination))
+        - Math.tan(latitude) * Math.tan(declination)) * 180 / Math.PI;
+    // Convert UTC solar minutes to California wall-clock minutes using today's actual offset.
+    const midday = new Date(noonUTC + 8 * 3600000);
+    const localMidday = californiaDateParts(midday);
+    const offset = (Date.UTC(localMidday.year, localMidday.month - 1, localMidday.day,
+        localMidday.hour, localMidday.minute, localMidday.second) - midday.getTime()) / 60000;
+    const solarNoon = 720 - 4 * location.longitude - equation + offset;
+    return { sunrise: solarNoon - 4 * hourAngle, sunset: solarNoon + 4 * hourAngle };
+}
+
+export function getCaliforniaSkyPeriod(now = new Date(), selection = 'auto', location = CALIFORNIA_SKY_LOCATION) {
+    const { sunrise, sunset } = californiaSunTimes(now, location);
+    const parts = californiaDateParts(now);
+    const minute = parts.hour * 60 + parts.minute + parts.second / 60;
+    // A shared sunset appearance covers the hour centered on sunrise and sunset.
+    const automatic = minute < sunrise - 30 || minute >= sunset + 30 ? 'night'
+        : minute < sunrise + 30 ? 'dawn' : minute < sunset - 30 ? 'day' : 'evening';
+    const period = ['day', 'dawn', 'evening', 'night'].includes(selection) ? selection : automatic;
+    return { period, sky: period === 'day' ? 'day' : period === 'night' ? 'stars' : 'sunset', sunrise, sunset };
+}
+
+// Multiply surface brightness rather than subtracting RGB light, preserving the room's hue.
+export function addNeutralComputerShadow(THREE, materials) {
+    const uniforms = {
+        computerShadowCenter: { value: new THREE.Vector3() },
+        computerShadowReach: { value: 1 },
+        computerShadowStrength: { value: 0 },
+        computerShadowDecay: { value: 0 },
+    };
+    const originals = [];
+    for (const material of new Set(materials.filter(Boolean))) {
+        const compile = material.onBeforeCompile, cacheKey = material.customProgramCacheKey;
+        originals.push({ material, compile, cacheKey });
+        material.onBeforeCompile = function (shader, renderer) {
+            compile.call(this, shader, renderer);
+            Object.assign(shader.uniforms, uniforms);
+            shader.vertexShader = 'varying vec3 vComputerShadowPosition;\n' + shader.vertexShader;
+            shader.vertexShader = shader.vertexShader.replace('#include <worldpos_vertex>',
+                '#include <worldpos_vertex>\nvComputerShadowPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+            shader.fragmentShader = `varying vec3 vComputerShadowPosition;
+                uniform vec3 computerShadowCenter;
+                uniform float computerShadowReach;
+                uniform float computerShadowStrength;
+                uniform float computerShadowDecay;\n` + shader.fragmentShader;
+            shader.fragmentShader = shader.fragmentShader.replace('#include <tonemapping_fragment>', `
+                float computerDistance = length(vComputerShadowPosition - computerShadowCenter);
+                float computerFade = pow(clamp(1.0 - pow(computerDistance / max(computerShadowReach, 0.001), 4.0), 0.0, 1.0), 2.0);
+                float computerAttenuation = computerFade / pow(max(computerDistance, 0.1), computerShadowDecay);
+                gl_FragColor.rgb *= 1.0 / (1.0 + computerShadowStrength * computerAttenuation);
+                #include <tonemapping_fragment>`);
+        };
+        material.customProgramCacheKey = function () { return cacheKey.call(this) + ':neutral-computer-shadow-v1'; };
+        material.needsUpdate = true;
+    }
+    return { uniforms, dispose() {
+        for (const { material, compile, cacheKey } of originals) {
+            material.onBeforeCompile = compile;
+            material.customProgramCacheKey = cacheKey;
+            material.needsUpdate = true;
+        }
+    } };
+}
+
+const COMPUTER_STYLES = `
+/* Computer viewer and optional test controls; embedded in helpers.js. */
+
+#computer-editor {
+    position: fixed;
+    inset: auto auto 0 0;
+    margin: 0;
+    padding: 1em;
+    border: none;
+    background: yellow;
+    color: black;
+    font-family: serif;
+    font-size: 13px;
+    line-height: 15px;
+}
+
+#computer-editor label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+#computer-editor input,
+#computer-editor select,
+#computer-editor button {
+    font: inherit;
+}
+
+#computer-editor .modal-label {
+    text-decoration: underline;
+}
+
+#computer-editor .wall-editor-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+#computer-editor .wall-editor-filename {
+    min-width: 0;
+    font-size: 16px;
+    color: purple;
+    text-decoration: underline;
+    overflow-wrap: anywhere;
+}
+
+#computer-editor .wall-editor-actions {
+    margin-top: 12px;
+}
+
+#computer-editor button[name="close"] {
+    font-size: 13px;
+    font-weight: normal;
+    flex-shrink: 0;
+}
+
+/* Leave space for a gray frame around the published document. */
+        #computer-document {
+    --document-top-crop: 64px;
+    --document-scrollbar-crop: 24px;
+    overflow: hidden;
+    width: min(864px, 92vw);
+    height: 88vh;
+    max-width: 92vw;
+    max-height: 90vh;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: #ffb000;
+    box-shadow: 0 24px 36px 4px #0009;
+}
+
+/* A taller top banner holds the title; the other frame edges stay narrow. */
+        #computer-document .document-frame {
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 10px;
+    padding: 10px 12px 12px;
+    background: #adadad;
+    border: 8px outset #c4c4c4;
+}
+
+#computer-document .document-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+#computer-document .document-title {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px;
+    border: 4px inset #cccccc;
+    background: white;
+    color: #111;
+    font: 14px/20px Arial, sans-serif;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Keep the bevel outside the clipping layer so the iframe cannot cover its left edge. */
+        #computer-document .document-viewport {
+    min-height: 0;
+    min-width: 0;
+    border: 4px inset #cccccc;
+    background: #000;
+}
+
+#computer-document .document-clip {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #000;
+}
+
+#computer-document::backdrop {
+    background: transparent;
+}
+
+#computer-document .document-close {
+    flex: none;
+    margin: 0;
+}
+
+#computer-document .document-close button {
+    box-sizing: border-box;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 3px outset #cccccc;
+    border-radius: 0;
+    background: #adadad;
+    color: #000;
+    font: bold 18px/1 Arial, sans-serif;
+    cursor: pointer;
+}
+
+/* Reverse the bevel while the mouse or keyboard presses the button. */
+        #computer-document .document-close button:active {
+    border-style: inset;
+    padding: 2px 0 0 2px;
+}
+
+#computer-document .document-close button:focus {
+    outline: none;
+}
+
+#computer-document .document-close button:focus-visible {
+    outline: 1px dotted #000;
+    outline-offset: -6px;
+}
+
+/* Push Google's scrollbar outside the clipped viewer; wheel and touch scrolling still work. */
+        #computer-document iframe {
+    position: absolute;
+    top: calc(-1 * var(--document-top-crop));
+    left: 0;
+    display: block;
+    width: calc(100% + var(--document-scrollbar-crop));
+    height: calc(100% + var(--document-top-crop));
+    border: 0;
+    filter: invert(1) contrast(100) sepia(100) saturate(100) hue-rotate(-35deg);
+}
+
+#computer-editor {
+    max-height: 85vh;
+    overflow-y: auto;
+}
+
+#computer-editor [hidden] {
+    display: none !important;
+}
+
+#computer-shadow-controls {
+    margin: 12px 0 0;
+    padding: 8px;
+    border: 1px solid black;
+}
+`;
+const SKY_WORKSHOP_STYLES = `
+/* This workshop is used only by the archived test workshop. */
+#sky-workshop {
+    position: fixed;
+    z-index: 30;
+    inset: auto auto 0 0;
+    margin: 0;
+    padding: 1em;
+    border: 0;
+    background: yellow;
+    color: black;
+    font: 13px/1.3 serif;
+    width: min(390px, calc(100vw - 32px));
+    max-height: 85vh;
+    overflow-y: auto;
+}
+#sky-workshop::backdrop { background: transparent; }
+#sky-workshop input, #sky-workshop select, #sky-workshop button { font: inherit; }
+#sky-workshop select { max-width: 100%; }
+#sky-workshop fieldset { margin: 12px 0; padding: 8px; border: 1px solid black; }
+#sky-workshop .sky-slider { display: grid; grid-template-columns: minmax(0, 1fr) 75px 48px; gap: 2px 6px; margin: 8px 0; }
+#sky-workshop .sky-slider span { grid-column: 1 / -1; }
+#sky-workshop input[type=range] { width: 100%; min-width: 0; }
+#sky-workshop output { font-variant-numeric: tabular-nums; }
+#sky-workshop .sky-wheel { position: relative; width: 180px; height: 180px; margin: 12px auto; }
+#sky-workshop canvas { width: 100%; height: 100%; border-radius: 50%; touch-action: none; cursor: crosshair; }
+#sky-workshop canvas:focus-visible { outline: 2px solid black; outline-offset: 3px; }
+#sky-workshop [data-wheel-marker] { position: absolute; width: 10px; height: 10px; border: 2px solid white;
+    box-shadow: 0 0 0 1px black; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+#sky-workshop [data-color] { display: block; padding: 4px 8px; border: 1px solid black; text-align: center; }
+#sky-workshop input[type=number] { width: 55px; }
+#sky-workshop details label { display: flex; justify-content: space-between; margin: 4px 0; }
+
+#sky-workshop [data-settings-json], #sky-workshop [data-all-settings-json] { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; padding: 8px; border: 1px solid black; max-height: 300px; overflow-y: auto; font: 11px/1.4 monospace; }
+
+#sky-workshop input[data-range-input] { width: 100%; min-width: 0; box-sizing: border-box; grid-column: 2; grid-row: 2; }
+#sky-workshop .sky-slider input[type=range] { grid-column: 1; grid-row: 2; }
+#sky-workshop .sky-slider output { grid-column: 3; grid-row: 2; align-self: center; }
+#sky-workshop [data-color] { box-sizing: border-box; width: 100%; }
+`;
+
+// One portable computer prop. All images and sounds resolve beside this module, never through PHP routes.
+const ASSET_VERSION = new URL(import.meta.url).searchParams.get('v');
+const asset = path => {
+    const url = new URL(`./assets/rooms/${path}`, import.meta.url);
+    if (ASSET_VERSION) url.searchParams.set('v', ASSET_VERSION);
+    return url.href;
+};
+
+// Fixed production placement and lighting; the optional test editor can override local copies.
+export const COMPUTER_DEFAULTS = Object.freeze({
+    screenLight: Object.freeze({ enabled: true, intensity: 2.9, reach: 36, decay: 2.1,
+        x: 0, y: 27, z: 9.6, hue: 229, saturation: 30 }),
+    starsOff: Object.freeze({ shadowX: 8.6, shadowY: 2.2, shadowZ: 1.9,
+        shadowReach: 35, shadowStrength: 0.1, shadowDecay: 0.4 }),
+    volumes: Object.freeze({ startup: 0.11, shutdown: 0.06 }),
+    placement: Object.freeze({ width: 31.7, rotation: 322, x: 85, y: 0.1, z: 16.5 }),
+    on: Object.freeze({ shadowX: 8.6, shadowY: 2.2, shadowZ: 1.9,
+        shadowReach: 37, shadowStrength: 2.4, shadowDecay: 0, shadowMoldingStrength: 1, computerBrightness: 1.15 }),
+    off: Object.freeze({ shadowX: 8.6, shadowY: 2.2, shadowZ: 1.9,
+        shadowReach: 37, shadowStrength: 0.8, shadowDecay: 0, shadowMoldingStrength: 1, computerBrightness: 1 }),
+});
+export const DEFAULT_COMPUTER_DOCUMENT_URL = 'https://docs.google.com/document/d/e/2PACX-1vS-NhUvNixeN_CbjA1c63Ukkwsz79cPiG48FbtImX9ZHTSywKDDJErJOwXP-vY_BJdD674UGCR4zHfs/pub?embedded=true';
+const SOUNDS = {
+    beep: asset('audio/computer-modal.wav'),
+    startup: asset('audio/computer-windows-startup.wav'),
+    shutdown: asset('audio/computer-windows-shutdown.wav'),
+};
+// Keep the picture, pause, and sound together so the sequence cannot get out of step.
+export const COMPUTER_BOOT = [
+    { frame: 'computer-boot-0', pause: 1400, sound: 'beep' }, // BIOS checks.
+    { frame: 'computer-boot-1', pause: 1100 }, // Hardware summary.
+    { frame: 'computer-boot-2', pause: 3200 }, // Windows logo.
+    { frame: 'computer-boot-3', pause: 6750, sound: 'startup' }, // Desktop loads.
+    { frame: 'computer-boot-4', pause: 2000 }, // Icons appear.
+    { frame: 'computer-boot-5-complete', pause: 700 }, // Document application.
+];
+export const COMPUTER_SHUTDOWN = [
+    { frame: 'computer-shutdown-0', pause: 1500 }, // Application closes.
+    { frame: 'computer-shutdown-1', pause: 2500 }, // Confirmation.
+    { frame: 'computer-shutdown-2', pause: 3400, sound: 'shutdown' }, // Please wait.
+    { frame: 'computer-shutdown-3', pause: 1200 }, // Safe to turn off.
+    { frame: 'computer-shutdown-4-complete', pause: 800, sound: 'beep' },
+];
+const OFF_FRAME = COMPUTER_SHUTDOWN.at(-1).frame;
+const ON_FRAME = COMPUTER_BOOT.at(-1).frame;
+const STORAGE = {
+    placement: 'y9k-test-computer-4-placement-v1',
+    on: 'y9k-test-computer-4-shadow-on-v1', off: 'y9k-test-computer-4-shadow-off-v2',
+    starsOff: 'y9k-test-computer-stars-off-shadow-v1',
+    rotation: 'y9k-test-auto-rotation',
+    volumes: 'y9k-test-computer-volumes-v1',
+    screenLight: 'y9k-test-computer-screen-light-v1',
+};
+const PLACEMENT_LIMITS = { x: [-120, 120], y: [-120, 120], z: [0, 240], width: [0.1, 240], rotation: [0, 359] };
+const LIGHT_LIMITS = { shadowX: [-120, 120], shadowY: [-120, 120], shadowZ: [-120, 120],
+    shadowReach: [1, 240], shadowStrength: [0, 30], shadowDecay: [0, 4], computerBrightness: [0, 2], shadowMoldingStrength: [0, 2] };
+const SCREEN_LIGHT_LIMITS = { intensity: [0, 30], reach: [1, 240], decay: [0, 4],
+    x: [-120, 120], y: [-120, 120], z: [-120, 120], hue: [0, 359], saturation: [0, 100] };
+const placementKeys = Object.keys(COMPUTER_DEFAULTS.placement);
+const lightingKeys = Object.keys(COMPUTER_DEFAULTS.on);
+
+// Early BIOS frames have no screen spill; it starts at the Windows logo and ends at the safe-to-turn-off screen.
+export function isComputerScreenLit(frame) {
+    return !['computer-boot-0', 'computer-boot-1', 'computer-shutdown-3', OFF_FRAME].includes(frame);
+}
+export function computerShadowProfile(mode, sky) {
+    return mode === 'off' && sky === 'stars' ? 'starsOff' : mode;
+}
+
+export function readComputerSettings(storage, key, defaults, limits) {
+    const settings = { ...defaults };
+    try {
+        const saved = JSON.parse(storage.getItem(key));
+        for (const [name, [min, max]] of Object.entries(limits))
+            if (typeof saved?.[name] === 'number' && Number.isFinite(saved[name]))
+                settings[name] = Math.max(min, Math.min(max, saved[name]));
+    } catch { /* Storage failures leave the fixed starter values usable. */ }
+    return settings;
+}
+
+const COMPUTER_SKIES = ['day', 'sunset', 'stars'];
+export const computerSkyStorageKey = (sky, mode) => mode ? `y9k-test-computer-sky-v2:${sky}:${mode}` : `y9k-test-computer-sky-v1:${sky}`;
+export function defaultComputerSkySettings(sky, mode) {
+    const state = { placement: { ...COMPUTER_DEFAULTS.placement },
+        profiles: { on: { ...COMPUTER_DEFAULTS.on }, off: { ...COMPUTER_DEFAULTS.off }, starsOff: { ...COMPUTER_DEFAULTS.starsOff } },
+        screenLight: { ...COMPUTER_DEFAULTS.screenLight }, volumes: { ...COMPUTER_DEFAULTS.volumes },
+        autoRotation: true, screenLightPreview: false };
+    const preset = SKY_DEFAULTS.skies[sky]?.states[mode]?.computer;
+    if (preset) {
+        Object.assign(state.placement, preset.placement);
+        Object.assign(state.profiles[mode], preset.lighting);
+        if (sky === 'stars' && mode === 'off') Object.assign(state.profiles.starsOff, preset.lighting);
+        Object.assign(state.screenLight, preset.screenLight);
+        Object.assign(state.volumes, preset.volumes);
+        state.autoRotation = preset.autoRotation;
+    }
+    return state;
+}
+// Enclosed rooms deliberately use day/on and night/off computer settings.
+export function computerRoomSettings(sky, mode) {
+    return defaultComputerSkySettings(sky ?? (mode === 'on' ? 'day' : 'stars'), mode);
+}
+
+export function readComputerSkySettings(storage, sky, seed, mode) {
+    let saved;
+    try { saved = JSON.parse(storage?.getItem(computerSkyStorageKey(sky, mode)) ?? 'null'); } catch { }
+    // Older per-sky saves seed each light state once, preserving existing tuning.
+    if (!saved && mode) {
+        try { saved = JSON.parse(storage?.getItem(computerSkyStorageKey(sky)) ?? 'null'); } catch { }
+    }
+    saved = saved && typeof saved === 'object' ? saved : seed;
+    const settings = defaultComputerSkySettings(sky, mode);
+    // Reuse the numeric limits for each part of a complete sky settings set.
+    const read = (value, defaults, limits) => readComputerSettings({ getItem: () => JSON.stringify(value) }, '', defaults, limits);
+    settings.placement = read(saved?.placement, settings.placement, PLACEMENT_LIMITS);
+    for (const mode of ['on', 'off', 'starsOff']) settings.profiles[mode] = read(saved?.profiles?.[mode], settings.profiles[mode], LIGHT_LIMITS);
+    settings.screenLight = read(saved?.screenLight, settings.screenLight, SCREEN_LIGHT_LIMITS);
+    settings.volumes = read(saved?.volumes, settings.volumes, { startup: [0, 1], shutdown: [0, 1] });
+    if (typeof saved?.screenLight?.enabled === 'boolean') settings.screenLight.enabled = saved.screenLight.enabled;
+    for (const key of ['autoRotation', 'screenLightPreview']) if (typeof saved?.[key] === 'boolean') settings[key] = saved[key];
+    return settings;
+}
+
+// Playback waits for both the screen pause and its sound; muted audio keeps the same timing.
+export async function runComputerSequence(steps, { show, play, wait }) {
+    for (const step of steps) {
+        show(step.frame);
+        await Promise.all([wait(step.pause), step.sound ? play(step.sound) : Promise.resolve()]);
+    }
+}
+
+const mounted = new WeakMap();
+
+// Call after room.mount(). Normal rooms use fixed defaults; editor:true retains the test controls.
+export async function addComputer(room, { editor = false, skyProfiles = false, shadowMolding = false, documentUrl = DEFAULT_COMPUTER_DOCUMENT_URL } = {}) {
+    if (!room.app) throw new Error('Mount the room before adding its computer.');
+    if (mounted.has(room)) return mounted.get(room);
+    const task = (async () => {
+        let computer;
+        room.addCustom(async context => { computer = await mountComputer(context, { editorEnabled: editor, skyProfiles, shadowMolding, documentUrl }); });
+        await room.ready;
+        return computer;
+    })();
+    mounted.set(room, task);
+    try { return await task; }
+    catch (error) { mounted.delete(room); throw error; }
+}
+
+async function mountComputer({ THREE, room, scene, layout, inchesToWorld, textureLoader }, { editorEnabled, skyProfiles, shadowMolding, documentUrl }) {
+    const { canvas, camera, orbit, music, clickable } = room.app;
+    // Load all frames before installing interactions, so the first click cannot race the images.
+    const textures = {};
+    const loads = await Promise.allSettled([...COMPUTER_BOOT, ...COMPUTER_SHUTDOWN].map(async ({ frame }) => {
+        const map = await textureLoader.loadAsync(asset(`models/${frame}.png`));
+        map.colorSpace = THREE.SRGBColorSpace;
+        map.magFilter = map.minFilter = THREE.NearestFilter;
+        textures[frame] = map;
+    }));
+    const failure = loads.find(result => result.status === 'rejected');
+    if (failure) {
+        Object.values(textures).forEach(map => map.dispose());
+        throw failure.reason;
+    }
+    installStyles();
+    const template = document.createElement('template');
+    template.innerHTML = DIALOGS;
+    const editor = template.content.querySelector('#computer-editor');
+    const viewer = template.content.querySelector('#computer-document');
+    if (editorEnabled) room.stage.appendChild(editor);
+    room.stage.appendChild(viewer);
+    const form = editor.querySelector('form');
+    const iframe = viewer.querySelector('iframe');
+    const address = viewer.querySelector('.document-title');
+    address.textContent = address.title = documentUrl;
+    const abort = new AbortController();
+    let disposed = false;
+    let busy = false;
+    let frame = OFF_FRAME;
+    let screenLightPreview = false;
+    let environmentSky = null;
+    let mode = room.app.roomLights.isOn() ? 'on' : 'off';
+    // Production never reads the test editor's saved overrides.
+    let storage;
+    try { if (editorEnabled) storage = localStorage; } catch { }
+    const placement = readComputerSettings(storage, STORAGE.placement, COMPUTER_DEFAULTS.placement, PLACEMENT_LIMITS);
+    const profiles = {
+        on: readComputerSettings(storage, STORAGE.on, COMPUTER_DEFAULTS.on, LIGHT_LIMITS),
+        off: readComputerSettings(storage, STORAGE.off, COMPUTER_DEFAULTS.off, LIGHT_LIMITS),
+        starsOff: readComputerSettings(storage, STORAGE.starsOff, COMPUTER_DEFAULTS.starsOff, LIGHT_LIMITS),
+    };
+    const shadowProfileKey = () => computerShadowProfile(mode, environmentSky);
+    // Keep the two Windows chimes independently adjustable in the test editor.
+    const volumes = readComputerSettings(storage, STORAGE.volumes, COMPUTER_DEFAULTS.volumes,
+        { startup: [0, 1], shutdown: [0, 1] });
+    const screenSettings = readComputerSettings(storage, STORAGE.screenLight, COMPUTER_DEFAULTS.screenLight, SCREEN_LIGHT_LIMITS);
+    try {
+        const saved = JSON.parse(storage?.getItem(STORAGE.screenLight) ?? 'null');
+        if (typeof saved?.enabled === 'boolean') screenSettings.enabled = saved.enabled;
+    } catch { }
+    let autoRotation = true;
+    if (editorEnabled) {
+        try { autoRotation = storage?.getItem(STORAGE.rotation) !== '0'; } catch { }
+        room.app.setAutoSpin(autoRotation ? 0.00035 : 0);
+    }
+    let scopedSky = null;
+    const snapshot = () => structuredClone({ placement, profiles, volumes, screenLight: screenSettings, autoRotation, screenLightPreview });
+    const saveSky = () => {
+        if (!scopedSky) return;
+        try { storage?.setItem(computerSkyStorageKey(scopedSky, mode), JSON.stringify(snapshot())); } catch { }
+    };
+    const save = (key, value) => {
+        if (scopedSky) { saveSky(); return; }
+        try { storage?.setItem(key, JSON.stringify(value)); } catch { }
+    };
+    const applySavedSky = state => {
+        Object.assign(placement, state.placement);
+        Object.assign(volumes, state.volumes);
+        Object.assign(screenSettings, state.screenLight);
+        for (const key of ['on', 'off', 'starsOff']) profiles[key] = { ...state.profiles[key] };
+        autoRotation = state.autoRotation;
+        screenLightPreview = state.screenLightPreview;
+        if (editorEnabled) room.app.setAutoSpin(autoRotation ? 0.00035 : 0);
+    };
+    const listen = (target, event, callback, capture = false) =>
+        target.addEventListener(event, callback, { capture, signal: abort.signal });
+    // Cancel pending sequence delays when this component is removed from a room.
+    const wait = milliseconds => new Promise((resolve, reject) => {
+        if (abort.signal.aborted) { reject(new DOMException('Computer removed', 'AbortError')); return; }
+        const cancel = () => { clearTimeout(timer); reject(new DOMException('Computer removed', 'AbortError')); };
+        const timer = setTimeout(() => { abort.signal.removeEventListener('abort', cancel); resolve(); }, milliseconds);
+        abort.signal.addEventListener('abort', cancel, { once: true });
+    });
+    // Windows chimes sit below the original hardware beep in volume.
+    const play = name => music.playSfx(SOUNDS[name], name === 'beep' ? 0.5 : volumes[name]);
+    music.preloadSfx([SOUNDS.beep, SOUNDS.startup, SOUNDS.shutdown]);
+    const aspect = textures[OFF_FRAME].image.width / textures[OFF_FRAME].image.height;
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1 / aspect),
+        new THREE.MeshStandardMaterial({ map: textures[OFF_FRAME], transparent: true,
+            alphaTest: 0.05, side: THREE.DoubleSide }));
+    plane.position.y = 0.5 / aspect;
+    const pivot = new THREE.Group();
+    pivot.add(plane);
+    // The neutral surface shader darkens toward black even under colored room lighting.
+    const shadowMaterials = [...Object.values(room.materials),
+        ...[].concat(layout.ceiling.material), ...(layout.skylightLip?.children.map(mesh => mesh.material) ?? [])];
+    // Opt in from the test room while production keeps its existing appearance.
+    const moldingShadow = shadowMolding && layout.moldingMaterial
+        ? addNeutralComputerShadow(THREE, [layout.moldingMaterial]) : null;
+    const neutralShadow = addNeutralComputerShadow(THREE, shadowMaterials);
+    const shadowCenter = neutralShadow.uniforms.computerShadowCenter.value;
+    const screenLight = new THREE.PointLight(0xffffff);
+    screenLight.name = 'computer-screen-light';
+    scene.add(pivot, screenLight);
+    clickable.push(plane);
+
+    const update = () => {
+        const lighting = profiles[mode];
+        const shadowLighting = profiles[shadowProfileKey()];
+        plane.material.map = textures[frame];
+        plane.material.color.setScalar(lighting.computerBrightness);
+        pivot.position.set(0, 0, 0);
+        pivot.scale.setScalar(inchesToWorld(placement.width));
+        pivot.rotation.y = placement.rotation * Math.PI / 180;
+        pivot.updateMatrixWorld(true);
+        const bounds = new THREE.Box3().setFromObject(pivot);
+        pivot.position.set(inchesToWorld(placement.x), layout.floorY + inchesToWorld(placement.y),
+            layout.bounds.minZ + inchesToWorld(placement.z) - bounds.min.z);
+        pivot.updateMatrixWorld(true);
+        const worldBounds = new THREE.Box3().setFromObject(pivot);
+        neutralShadow.uniforms.computerShadowStrength.value = shadowLighting.shadowStrength;
+        neutralShadow.uniforms.computerShadowReach.value = inchesToWorld(shadowLighting.shadowReach);
+        neutralShadow.uniforms.computerShadowDecay.value = shadowLighting.shadowDecay;
+        if (moldingShadow) {
+            // Follow the room shadow, with an independent multiplier for the trim.
+            for (const key of Object.keys(neutralShadow.uniforms)) {
+                const value = neutralShadow.uniforms[key].value;
+                if (key === 'computerShadowCenter') moldingShadow.uniforms[key].value.copy(value);
+                else moldingShadow.uniforms[key].value = value;
+            }
+            moldingShadow.uniforms.computerShadowStrength.value *= shadowLighting.shadowMoldingStrength ?? profiles[mode].shadowMoldingStrength;
+        }
+        shadowCenter.set(pivot.position.x + inchesToWorld(shadowLighting.shadowX),
+            Math.max(layout.floorY + inchesToWorld(12), worldBounds.min.y + inchesToWorld(12)) + inchesToWorld(shadowLighting.shadowY),
+            Math.max(layout.bounds.minZ + inchesToWorld(6), worldBounds.min.z - inchesToWorld(6)) + inchesToWorld(shadowLighting.shadowZ));
+        if (moldingShadow) moldingShadow.uniforms.computerShadowCenter.value.copy(shadowCenter);
+        // Offsets are relative to the computer: positive Z moves in front of the screen.
+        screenLight.position.set(inchesToWorld(screenSettings.x), inchesToWorld(screenSettings.y), inchesToWorld(screenSettings.z))
+            .applyAxisAngle(new THREE.Vector3(0, 1, 0), pivot.rotation.y).add(pivot.position);
+        screenLight.color.setHSL(screenSettings.hue / 360, screenSettings.saturation > 0 ? 1 : 0,
+            1 - screenSettings.saturation / 200, THREE.SRGBColorSpace);
+        screenLight.intensity = screenSettings.enabled && (isComputerScreenLit(frame) || screenLightPreview) ? screenSettings.intensity : 0;
+        screenLight.distance = inchesToWorld(screenSettings.reach);
+        screenLight.decay = screenSettings.decay;
+    };
+    const show = next => { if (!disposed) { frame = next; update(); } };
+    const sequence = steps => runComputerSequence(steps, { show, play, wait });
+    const open = async () => {
+        if (disposed || busy || viewer.open || editor.open) return;
+        busy = true;
+        try {
+            await sequence(COMPUTER_BOOT);
+            if (disposed) return;
+            iframe.src = documentUrl;
+            viewer.showModal();
+            play('beep');
+            viewer.querySelector('button').blur();
+        } catch (error) { if (!disposed) console.error('Computer startup failed:', error); }
+        finally { busy = false; }
+    };
+    listen(viewer, 'close', async () => {
+        if (disposed) return;
+        busy = true;
+        try {
+            play('beep');
+            iframe.removeAttribute('src');
+            show(ON_FRAME);
+            await wait(1000);
+            await sequence(COMPUTER_SHUTDOWN);
+        } catch (error) { if (!disposed) console.error('Computer shutdown failed:', error); }
+        finally { busy = false; }
+    });
+    let pressedOutside = false;
+    const outside = event => {
+        const rect = viewer.getBoundingClientRect();
+        return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+    };
+    listen(viewer, 'pointerdown', event => { pressedOutside = event.button === 0 && outside(event); });
+    listen(viewer, 'pointercancel', () => { pressedOutside = false; });
+    listen(viewer, 'click', event => {
+        if (pressedOutside && outside(event)) viewer.close();
+        pressedOutside = false;
+    });
+    for (const dialog of [viewer, editor]) listen(dialog, 'keydown', event => event.stopPropagation());
+
+    const syncEditor = () => {
+        for (const key of ['x', 'y', 'z', 'width', ...lightingKeys]) {
+            const value = key in placement ? placement[key]
+                : key.startsWith('shadow') ? (profiles[shadowProfileKey()][key] ?? profiles[mode][key]) : profiles[mode][key];
+            form.elements[key].value = value;
+            const unit = ['shadowStrength', 'shadowDecay', 'shadowMoldingStrength', 'computerBrightness'].includes(key) ? '' : ' in';
+            editor.querySelector(`[data-value="${key}"]`).textContent = `${value.toFixed(key === 'computerBrightness' ? 2 : 1)}${unit}`;
+        }
+        form.elements.angle.value = placement.rotation;
+        form.elements.rotation.value = [0, 90, 180, 270].includes(placement.rotation) ? String(placement.rotation) : '';
+        editor.querySelector('[data-value="angle"]').textContent = `${placement.rotation}°`;
+        editor.querySelector('legend').textContent = `lighting · lights ${mode}${shadowProfileKey() === 'starsOff' ? ' · stars shadow' : ''}`;
+        editor.querySelector('#computer-shadow-controls').hidden = false;
+        form.elements.autoRotation.checked = autoRotation;
+        for (const name of ['startup', 'shutdown']) {
+            form.elements[`${name}Volume`].value = volumes[name];
+            editor.querySelector(`[data-value="${name}Volume"]`).textContent = `${Math.round(volumes[name] * 100)}%`;
+        }
+        editor.querySelector('#computer-editor-title').textContent = 'computer · placement and lighting';
+    };
+    if (editorEnabled) {
+        listen(form, 'input', event => {
+            const key = event.target.name;
+            if (key === 'startupVolume' || key === 'shutdownVolume') {
+                volumes[key === 'startupVolume' ? 'startup' : 'shutdown'] = Number(event.target.value);
+                save(STORAGE.volumes, volumes);
+                syncEditor();
+                return;
+            }
+            if (key === 'autoRotation') {
+                autoRotation = event.target.checked;
+                room.app.setAutoSpin(autoRotation ? 0.00035 : 0);
+                if (scopedSky) saveSky();
+                else try { storage?.setItem(STORAGE.rotation, autoRotation ? '1' : '0'); } catch { }
+                return;
+            }
+            if (key === 'rotation' || key === 'angle') placement.rotation = Number(event.target.value);
+            else if (placementKeys.includes(key)) placement[key] = Number(event.target.value);
+            else if (lightingKeys.includes(key)) profiles[key.startsWith('shadow') ? shadowProfileKey() : mode][key] = Number(event.target.value);
+            update();
+            syncEditor();
+            save(STORAGE.placement, placement);
+            save(STORAGE[mode], profiles[mode]);
+            if (shadowProfileKey() === 'starsOff') save(STORAGE.starsOff, profiles.starsOff);
+        });
+        listen(form.elements.restoreDefaults, 'click', () => resetCurrentSky());
+    }
+    const resetCurrentSky = () => {
+        // Reset only this sky/light-state slot; all seven other slots stay intact.
+        applySavedSky(defaultComputerSkySettings(scopedSky, mode));
+        if (scopedSky) saveSky();
+        else {
+            save(STORAGE.placement, placement); save(STORAGE.volumes, volumes);
+            save(STORAGE.screenLight, screenSettings);
+            for (const state of ['on', 'off', 'starsOff']) save(STORAGE[state], profiles[state]);
+        }
+        update();
+        if (editor.open) syncEditor();
+    };
+    const unsubscribeLights = room.app.roomLights.onChange(on => {
+        const nextMode = on ? 'on' : 'off';
+        if (nextMode !== mode && scopedSky) {
+            saveSky();
+            mode = nextMode;
+            applySavedSky(readComputerSkySettings(storage, scopedSky, undefined, mode));
+            saveSky();
+        } else mode = nextMode;
+        if (skyProfiles && !editorEnabled) applySavedSky(computerRoomSettings(environmentSky, mode));
+        update();
+        if (editor.open) syncEditor();
+    });
+
+    // Capture only computer presses; other props and the room keep their own handlers.
+    const ray = new THREE.Raycaster(), pointer = new THREE.Vector2();
+    let press = null;
+    const cancelPress = () => { if (press) clearTimeout(press.timer); press = null; };
+    listen(canvas, 'pointerdown', event => {
+        if (event.button !== 0 || event.isPrimary === false) { cancelPress(); return; }
+        const rect = canvas.getBoundingClientRect();
+        pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -(event.clientY - rect.top) / rect.height * 2 + 1);
+        ray.setFromCamera(pointer, camera);
+        const hit = ray.intersectObjects(scene.children, true).find(hit => {
+            for (let object = hit.object; object; object = object.parent) if (!object.visible) return false;
+            return hit.object.isMesh;
+        });
+        if (hit?.object !== plane) return;
+        event.stopImmediatePropagation();
+        cancelPress();
+        press = { id: event.pointerId, x: event.clientX, y: event.clientY, lastX: event.clientX, dragged: false, held: false };
+        canvas.setPointerCapture(event.pointerId);
+        if (editorEnabled) press.timer = setTimeout(() => {
+            if (!press || press.dragged || busy) return;
+            press.held = true;
+            syncEditor();
+            editor.showModal();
+        }, 1650);
+    }, true);
+    listen(canvas, 'pointermove', event => {
+        if (!press || press.id !== event.pointerId) return;
+        event.stopImmediatePropagation();
+        if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 4) {
+            press.dragged = true;
+            clearTimeout(press.timer);
+        }
+        if (press.dragged && !press.held) {
+            const delta = (event.clientX - press.lastX) * 0.005;
+            orbit.setAngle(orbit.getAngle() + delta);
+            room._onUserRotate(delta);
+        }
+        press.lastX = event.clientX;
+    }, true);
+    listen(canvas, 'pointerup', event => {
+        if (!press || press.id !== event.pointerId) return;
+        event.stopImmediatePropagation();
+        const clicked = !press.dragged && !press.held;
+        cancelPress();
+        if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+        if (clicked) open();
+    }, true);
+    for (const event of ['pointercancel', 'lostpointercapture']) listen(canvas, event, cancelPress, true);
+    listen(window, 'blur', cancelPress);
+
+    return {
+        open,
+        close() { if (viewer.open) viewer.close(); },
+        // Let test-room workshops tune a lighting profile without opening another dialog.
+        setSky(sky) {
+            if (disposed || environmentSky === sky) return;
+            // Seed only the first selected sky with existing tuning, not every newly visited sky.
+            if (editorEnabled && COMPUTER_SKIES.includes(sky)) {
+                const seed = scopedSky === null ? snapshot() : undefined;
+                saveSky();
+                const state = readComputerSkySettings(storage, sky, seed, mode);
+                scopedSky = sky;
+                applySavedSky(state);
+                saveSky();
+            }
+            environmentSky = sky;
+            if (skyProfiles && !editorEnabled) applySavedSky(computerRoomSettings(sky, mode));
+            update();
+            if (editor.open) syncEditor();
+        },
+        restoreSkyDefaults() { if (!disposed && editorEnabled) resetCurrentSky(); },
+        // Export a detached copy of only the active sky/light-state controls.
+        getSettings(sky = scopedSky, state = mode) {
+            // Read inactive slots without switching the visible computer or writing storage.
+            const values = sky === scopedSky && state === mode ? snapshot()
+                : readComputerSkySettings(storage, sky, undefined, state);
+            return structuredClone({ placement: values.placement,
+                lighting: { ...values.profiles[state], ...values.profiles[computerShadowProfile(state, sky)] },
+                screenLight: values.screenLight, volumes: values.volumes, autoRotation: values.autoRotation,
+                screenLightPreview: values.screenLightPreview, documentUrl });
+        },
+        getScreenLight() { return { ...screenSettings, preview: screenLightPreview }; },
+        setScreenLightPreview(on) {
+            if (disposed) return;
+            screenLightPreview = !!on;
+            saveSky();
+            update();
+        },
+        setScreenLight(patch) {
+            if (disposed) return;
+            if (typeof patch.enabled === 'boolean') screenSettings.enabled = patch.enabled;
+            for (const [key, value] of Object.entries(patch)) {
+                if (!Object.hasOwn(SCREEN_LIGHT_LIMITS, key) || !Number.isFinite(value)) continue;
+                const [min, max] = SCREEN_LIGHT_LIMITS[key];
+                screenSettings[key] = Math.max(min, Math.min(max, value));
+            }
+            save(STORAGE.screenLight, screenSettings);
+            update();
+        },
+        getLighting(state) { return { ...profiles[state] }; },
+        setLighting(state, patch) {
+            if (disposed || !Object.hasOwn(profiles, state)) return;
+            for (const [key, value] of Object.entries(patch)) {
+                if (!Object.hasOwn(LIGHT_LIMITS, key) || !Number.isFinite(value)) continue;
+                const [min, max] = LIGHT_LIMITS[key];
+                profiles[state][key] = Math.max(min, Math.min(max, value));
+            }
+            save(STORAGE[state], profiles[state]);
+            if (state === mode || state === shadowProfileKey()) { update(); if (editor.open) syncEditor(); }
+        },
+        // Removal cleans up this component without touching room audio, lighting, or other props.
+        dispose() {
+            if (disposed) return;
+            disposed = true;
+            unsubscribeLights();
+            abort.abort();
+            cancelPress();
+            if (viewer.open) viewer.close();
+            if (editor.open) editor.close();
+            iframe.removeAttribute('src');
+            viewer.remove();
+            editor.remove();
+            scene.remove(pivot, screenLight);
+            const index = clickable.indexOf(plane);
+            if (index !== -1) clickable.splice(index, 1);
+            plane.geometry.dispose();
+            plane.material.dispose();
+            Object.values(textures).forEach(map => map.dispose());
+            neutralShadow.dispose();
+            moldingShadow?.dispose();
+            screenLight.dispose();
+            mounted.delete(room);
+        },
+    };
+}
+
+// Embed component styling here so the live page has one application helper dependency.
+function installStyles() {
+    if (document.getElementById('computer-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'computer-styles';
+    style.textContent = COMPUTER_STYLES;
+    document.head.appendChild(style);
+}
+
+// Trusted component markup; no document content or URLs are interpolated here.
+const DIALOGS = `
+    <!-- Share the artwork dialog's yellow styling and bottom-left placement. -->
+    <dialog id="computer-editor" class="wall-image-editor" aria-labelledby="computer-editor-title">
+        <form method="dialog">
+            <div class="wall-editor-header">
+                <div id="computer-editor-title" class="wall-editor-filename">computer placement</div>
+                <button type="submit" name="close" aria-label="close computer editor">x</button>
+            </div>
+            <p>X is from the wall center; Y is above or below the floor.<br>Z is the distance from the north wall.<br>Computer settings are saved in this browser.</p>
+            <label><span class="modal-label">x</span>: <input name="x" type="range" min="-120" max="120" step="0.1" value="0"><output data-value="x"></output></label><br>
+            <label><span class="modal-label">y</span>: <input name="y" type="range" min="-120" max="120" step="0.1" value="0"><output data-value="y"></output></label><br>
+            <label><span class="modal-label">z</span>: <input name="z" type="range" min="0" max="240" step="0.1" value="3"><output data-value="z"></output></label><br>
+            <label><span class="modal-label">width</span>: <input name="width" type="range" min="0.1" max="240" step="0.1" value="48"><output data-value="width"></output></label><br>
+            <label><span class="modal-label">rotation</span>: <select name="rotation" aria-label="computer rotation"><option value="" disabled>custom</option><option value="0">north</option><option value="270">east</option><option value="180">south</option><option value="90">west</option></select></label><br>
+            <label><span class="modal-label">angle</span>: <input name="angle" type="range" min="0" max="359" step="1" value="0"><output data-value="angle"></output></label><br>
+            <label><span class="modal-label">auto rotation</span>: <input name="autoRotation" type="checkbox" checked></label><br>
+            <label><span class="modal-label">startup volume</span>: <input name="startupVolume" type="range" min="0" max="1" step="0.01" value="0.2"><output data-value="startupVolume"></output></label><br>
+            <label><span class="modal-label">shutdown volume</span>: <input name="shutdownVolume" type="range" min="0" max="1" step="0.01" value="0.2"><output data-value="shutdownVolume"></output></label><br>
+            <fieldset id="computer-shadow-controls" hidden>
+                <legend>lighting</legend>
+                <label><span class="modal-label">computer brightness</span>: <input name="computerBrightness" type="range" min="0" max="2" step="0.05" value="1"><output data-value="computerBrightness"></output></label><br>
+                <p>Position offsets are in room axes, relative to the shadow's starting position.<br>Strength 0 turns it off; higher falloff makes the effect more localized.</p>
+                <label><span class="modal-label">shadow x</span>: <input name="shadowX" type="range" min="-120" max="120" step="0.1" value="0"><output data-value="shadowX"></output></label><br>
+                <label><span class="modal-label">shadow y</span>: <input name="shadowY" type="range" min="-120" max="120" step="0.1" value="0"><output data-value="shadowY"></output></label><br>
+                <label><span class="modal-label">shadow z</span>: <input name="shadowZ" type="range" min="-120" max="120" step="0.1" value="0"><output data-value="shadowZ"></output></label><br>
+                <label><span class="modal-label">size / reach</span>: <input name="shadowReach" type="range" min="1" max="240" step="1" value="72"><output data-value="shadowReach"></output></label><br>
+                <label><span class="modal-label">baseboard shadow multiplier</span>: <input name="shadowMoldingStrength" type="range" min="0" max="2" step="0.1"><output data-value="shadowMoldingStrength"></output></label><br>
+                <label><span class="modal-label">strength</span>: <input name="shadowStrength" type="range" min="0" max="30" step="0.1" value="4"><output data-value="shadowStrength"></output></label><br>
+                <label><span class="modal-label">falloff</span>: <input name="shadowDecay" type="range" min="0" max="4" step="0.1" value="2"><output data-value="shadowDecay"></output></label><br>
+            </fieldset>
+            <div class="wall-editor-actions">
+                <button type="button" name="restoreDefaults">restore current sky / light state defaults</button>
+                <button type="submit">done</button>
+            </div>
+        </form>
+    </dialog>
+    <dialog id="computer-document" aria-label="Computer document viewer">
+        <div class="document-frame">
+            <div class="document-banner">
+                <div class="document-title" aria-label="Document URL"></div>
+                <form method="dialog" class="document-close"><button aria-label="close document viewer">x</button></form>
+            </div>
+            <div class="document-viewport">
+                <div class="document-clip">
+                    <iframe title="Computer Google document" referrerpolicy="no-referrer"></iframe>
+                </div>
+            </div>
+        </div>
+    </dialog>
+`;
+
+// Apply only to actual skylight rooms. Other rooms keep their native room lighting.
+export async function addSkyLighting(room, { computer = null } = {}) {
+    if (room.hallway || !room.options.gallerySkylight) return null;
+    const { THREE, scene, roomLights, textureLoader } = room.app;
+    await room.skylightSkyReady;
+    const textures = {};
+    const results = await Promise.allSettled(Object.entries(SKY_DEFAULTS.skies).map(async ([sky, data]) => {
+        const map = await textureLoader.loadAsync(new URL(data.skyImage, import.meta.url).href);
+        map.colorSpace = THREE.SRGBColorSpace;
+        map.magFilter = map.minFilter = THREE.NearestFilter;
+        textures[sky] = map;
+    }));
+    const failure = results.find(result => result.status === 'rejected');
+    if (failure) { Object.values(textures).forEach(map => map.dispose()); throw failure.reason; }
+    const colors = new Map();
+    const ambient = scene.children.find(object => object.isAmbientLight && object !== room.skylightDaylight);
+    const directional = scene.children.find(object => object.isDirectionalLight);
+    for (const light of [ambient, directional, room.galleryFillLight, room.skylightDaylight].filter(Boolean)) colors.set(light, light.color.clone());
+    const surfaces = Object.entries(room.materials).map(([key, material]) => ({ key, material, color: material.color.clone() }));
+    const reveal = room.layout.ceiling.material[1];
+    const revealColor = reveal?.color.clone();
+    const trimFaces = (room.layout.skylightLip?.children ?? []).map(mesh => {
+        const original = mesh.material;
+        const bottom = original.clone(), band = original.clone();
+        mesh.material = [band, band, original, bottom, band, band];
+        return { mesh, original, color: original.color.clone(), bottom, band };
+    });
+    const lines = scene.children.filter(object => object.isLineSegments);
+    const lineColors = lines.map(line => {
+        const skylight = line.name === 'skylight-edge-lines';
+        return { line, on: new THREE.Color(skylight ? room.options.skylightLipEdgeColor : room.options.cornerLines),
+            off: new THREE.Color(skylight ? room.options.skylightLipOffEdgeColor : room.options.galleryOffEdgeColor) };
+    });
+    const verticals = scene.getObjectByName('skylight-vertical-lines');
+    const corners = new THREE.Group();
+    const geometry = new THREE.CylinderGeometry(1, 1, 1, 8);
+    const material = new THREE.MeshBasicMaterial({ toneMapped: false });
+    if (verticals) {
+        verticals.visible = false;
+        const positions = verticals.geometry.getAttribute('position');
+        for (let i = 0; i < positions.count; i += 2) {
+            const from = new THREE.Vector3().fromBufferAttribute(positions, i);
+            const to = new THREE.Vector3().fromBufferAttribute(positions, i + 1);
+            const direction = to.clone().sub(from);
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.userData.length = direction.length();
+            mesh.position.copy(from).add(to).multiplyScalar(0.5);
+            mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize());
+            corners.add(mesh);
+        }
+    }
+    scene.add(corners);
+    const selects = new Set();
+    let selection = 'auto';
+    let current = null;
+    // Match the workshop HSV wheel: full value preserves the surface's base color.
+    const tint = (hue, saturation, value = 1) => {
+        const h = ((hue % 360) + 360) % 360 / 60, s = saturation / 100;
+        const c = value * s, x = c * (1 - Math.abs(h % 2 - 1)), m = value - c;
+        const rgb = h < 1 ? [c, x, 0] : h < 2 ? [x, c, 0] : h < 3 ? [0, c, x]
+            : h < 4 ? [0, x, c] : h < 5 ? [x, 0, c] : [c, 0, x];
+        return new THREE.Color().setRGB(...rgb.map(channel => channel + m), THREE.SRGBColorSpace);
+    };
+    const apply = () => {
+        current = getCaliforniaSkyPeriod(new Date(), selection);
+        const state = roomLights.isOn() ? 'on' : 'off';
+        const p = SKY_DEFAULTS.skies[current.sky].states[state].lighting;
+        computer?.setSky(current.sky);
+        scene.background = textures[current.sky];
+        scene.backgroundIntensity = p.sky;
+        const roomTint = tint(p.hue, p.saturation, p.value);
+        for (const [light, color] of colors) light.color.copy(color).multiply(roomTint);
+        if (ambient) ambient.intensity = p.ambient * p.room;
+        if (directional) directional.intensity = p.directional * p.room;
+        if (room.galleryFillLight) room.galleryFillLight.intensity = p.fill * p.room;
+        if (room.skylightDaylight) room.skylightDaylight.intensity = p.daylight * p.room;
+        room.skylightTreeMaterial?.color.setScalar(p.trees);
+        room.skylightOutside?.traverse(object => {
+            if (object.isLineSegments) object.material.color.setHex(0x333333).multiplyScalar(p.trees);
+        });
+        for (const { key, material, color } of surfaces) material.color.copy(color).multiplyScalar(p[key]);
+        const lipTint = tint(p.lipHue, p.lipSaturation, p.lipValue);
+        if (reveal) reveal.color.copy(revealColor).multiply(lipTint).multiplyScalar(p.reveal);
+        for (const face of trimFaces) {
+            face.original.color.copy(face.color).multiply(lipTint).multiplyScalar(p.trim);
+            face.bottom.color.copy(face.original.color).multiply(tint(p.bottomHue, p.bottomSaturation, p.bottomValue)).multiplyScalar(p.lipBottom);
+            face.band.color.copy(face.original.color).multiply(tint(p.bandHue, p.bandSaturation, p.bandValue)).multiplyScalar(p.lipBand);
+        }
+        material.color.setHex(state === 'on' ? room.options.skylightEdgeColor : room.options.skylightOffEdgeColor)
+            .multiply(lipTint).multiplyScalar(p.verticalBrightness);
+        corners.visible = p.verticalThickness > 0;
+        for (const mesh of corners.children) mesh.scale.set(p.verticalThickness / 40, mesh.userData.length, p.verticalThickness / 40);
+        for (const { line, on, off } of lineColors) line.material.color.copy(state === 'on' ? on : off)
+            .multiplyScalar(line.name.startsWith('skylight-') ? p.edges : p.roomEdges);
+        scene.traverse(object => {
+            if (!object.userData?.isLightFixture) return;
+            const face = object.material[3];
+            face.color.setScalar(p.fixtures);
+            if (state === 'on') face.emissive.setRGB(14, 13.2, 11.5).multiply(roomTint).multiplyScalar(p.fixtureGlow);
+            else face.emissive.copy(roomTint).multiplyScalar(p.fixtureGlow);
+        });
+        for (const select of selects) select.value = selection;
+    };
+    const api = {
+        setSelection(value) {
+            if (!['auto', 'day', 'dawn', 'evening', 'night'].includes(value)) return;
+            selection = value;
+            apply();
+        },
+        addControls(panel) {
+            if (!panel || panel.querySelector('[data-sky-period]')) return;
+            const label = document.createElement('label');
+            label.innerHTML = '<span class="modal-label">sky</span>: <select data-sky-period aria-label="Sky time of day"><option value="auto">Automatic · California time</option><option value="day">Day</option><option value="dawn">Dawn</option><option value="evening">Evening</option><option value="night">Night</option></select>';
+            const select = label.querySelector('select');
+            select.value = selection;
+            select.addEventListener('change', () => api.setSelection(select.value));
+            for (const type of ['click', 'pointerdown', 'dblclick']) label.addEventListener(type, event => event.stopPropagation());
+            selects.add(select);
+            panel.appendChild(label);
+        },
+        getState: () => ({ ...current, selection }),
+        dispose() {
+            clearInterval(timer); unsubscribe();
+            if (room.skyLighting === api) room.skyLighting = null;
+            for (const select of selects) select.parentElement.remove();
+            for (const face of trimFaces) { face.mesh.material = face.original; face.bottom.dispose(); face.band.dispose(); }
+            scene.remove(corners); geometry.dispose(); material.dispose();
+            Object.values(textures).forEach(map => map.dispose());
+        },
+    };
+    // Subscribe after construction; notifications include every real flicker pulse.
+    const unsubscribe = roomLights.onChange(apply);
+    const timer = setInterval(apply, 30000);
+    room.skyLighting = api;
+    for (const label of room.stage.querySelectorAll('[data-room-audio]')) api.addControls(label.parentElement);
+    return api;
+}
+
+export const SKY_OPTIONS = Object.freeze({
+    day: { label: 'Current day sky', path: './assets/rooms/images/static_images/windows.png' },
+    stars: { label: 'Stars 1', path: './assets/rooms/images/skies/stars-1.png' },
+    sunset: { label: 'Doom sunset', path: './assets/rooms/images/skies/doom-sunset.png' },
+});
+const SKY_WORKSHOP_STORAGE_KEY = 'y9k-test-sky-workshop-v1';
+// Every slider is a separate value in each sky's lights-on and lights-off profile.
+export const SKY_CONTROLS = Object.freeze({
+    room: ['Room light brightness', 0, 3, 0.05],
+    sky: ['Sky brightness', 0, 3, 0.05],
+    trees: ['Trees brightness', 0, 3, 0.05],
+    reveal: ['Inside opening brightness', 0, 3, 0.05],
+    lipBand: ['Skylight lip side band brightness multiplier', 0, 3, 0.05],
+    lipBottom: ['Skylight lip underside brightness multiplier', 0, 3, 0.05],
+    trim: ['Skylight lip brightness', 0, 3, 0.05],
+    wall: ['Walls brightness', 0, 2, 0.05],
+    floor: ['Floor brightness', 0, 2, 0.05],
+    ceiling: ['Ceiling brightness', 0, 2, 0.05],
+    roomEdges: ['Room edge line brightness', 0, 3, 0.05],
+    edges: ['Skylight edge line brightness', 0, 3, 0.05],
+    verticalThickness: ['4 inside lines thickness (inches)', 0, 2, 0.01],
+    verticalBrightness: ['4 inside lines brightness', 0, 3, 0.05],
+    ambient: ['Ambient light', 0, 6, 0.05],
+    directional: ['Directional light', 0, 4, 0.05],
+    fill: ['Center fill light', 0, 150, 0.5],
+    daylight: ['Skylight daylight', 0, 3, 0.05],
+    fixtures: ['Fixture face brightness', 0, 3, 0.05],
+    fixtureGlow: ['Fixture glow', 0, 3, 0.05],
+    hue: ['Selected color hue', 0, 359, 1],
+    saturation: ['Selected color saturation', 0, 100, 1],
+});
+
+export function getSkyForHour(hour, { dayStart = 6, sunsetStart = 17, nightStart = 20 } = {}) {
+    const time = ((hour % 24) + 24) % 24;
+    if (time < dayStart || time >= nightStart) return 'stars';
+    if (time < sunsetStart) return 'day';
+    return 'sunset';
+}
+
+// HSV keeps white at the wheel center and full-saturation colors around the rim.
+export function hsvToRgb(hue, saturation, value = 1) {
+    const h = ((hue % 360) + 360) % 360 / 60;
+    const s = Math.max(0, Math.min(1, saturation));
+    const c = value * s, x = c * (1 - Math.abs(h % 2 - 1)), m = value - c;
+    const [r, g, b] = h < 1 ? [c, x, 0] : h < 2 ? [x, c, 0] : h < 3 ? [0, c, x]
+        : h < 4 ? [0, x, c] : h < 5 ? [x, 0, c] : [c, 0, x];
+    return [r + m, g + m, b + m];
+}
+
+export function createSkySettings(options = {}) {
+    const common = { room: 1, sky: 1, trees: 1, reveal: 1, trim: 1, wall: 1, floor: 1,
+        ceiling: 1, roomEdges: 1, edges: 1, verticalThickness: 0.12, verticalBrightness: 1,
+        bandHue: 0, bandSaturation: 0, bandValue: 1, lipBand: 1, value: 1, lipValue: 1, lipBottom: 1, bottomHue: 0, bottomSaturation: 0, bottomValue: 1, hue: 0, saturation: 0, lipHue: 0, lipSaturation: 0, fixtures: 1 };
+    const on = { ...common, ambient: options.ambientLight ?? 2.7, directional: options.directionalLight ?? 0.55,
+        fill: 0, daylight: 0, fixtureGlow: options.galleryFixtureBrightness ?? 1 };
+    const off = { ...common, ambient: options.galleryOffAmbientLight ?? 0.05,
+        directional: options.galleryOffDirectionalLight ?? 0.04, fill: options.galleryFillIntensity ?? 68,
+        daylight: options.skylightLightIntensity ?? 0.35, fixtureGlow: options.galleryFixtureOffGlow ?? 0.9 };
+    const defaults = {
+        selection: 'auto', dayStart: 6, sunsetStart: 17, nightStart: 20,
+        colorTargetsByState: Object.fromEntries(Object.keys(SKY_OPTIONS).flatMap(sky => ['on', 'off'].map(mode => [`${sky}:${mode}`, 'room']))),
+        colorTargets: { day: 'room', sunset: 'room', stars: 'room' },
+        profiles: {
+            day: { on: { ...on }, off: { ...off } },
+            sunset: { on: { ...on, trees: 0.65, reveal: 0.7 },
+                off: { ...off, room: 0.75, trees: 0.55, reveal: 0.65, hue: 28, saturation: 30, daylight: 0.2 } },
+            stars: { on: { ...on, sky: 0.7, trees: 0.15, reveal: 0.2 },
+                off: { ...off, room: 0.3, sky: 0.55, trees: 0.05, reveal: 0.1, trim: 0.5,
+                    wall: 0.95, floor: 1.1, ceiling: 1, roomEdges: 0, edges: 0.1,
+                    verticalThickness: 0.07, verticalBrightness: 0, ambient: 0.1, directional: 0.55,
+                    hue: 215, saturation: 20, lipHue: 211.363636, lipSaturation: 17.254902,
+                    fill: 20, daylight: 0.05, fixtures: 1, fixtureGlow: 0.25 } },
+        },
+    };
+    // Keep unexported fields at their existing defaults, then apply approved tuning.
+    for (const sky of Object.keys(SKY_OPTIONS)) for (const mode of ['on', 'off']) {
+        Object.assign(defaults.profiles[sky][mode], SKY_DEFAULTS.skies[sky].states[mode].lighting);
+        defaults.colorTargetsByState[`${sky}:${mode}`] = SKY_DEFAULTS.skies[sky].states[mode].colorTarget;
+    }
+    return defaults;
+}
+
+export function restoreSkySettings(saved, defaults) {
+    const settings = structuredClone(defaults);
+    if (!saved || typeof saved !== 'object') return settings;
+    if (saved.selection === 'sunset2') settings.selection = 'sunset';
+    if (saved.selection === 'auto' || Object.hasOwn(SKY_OPTIONS, saved.selection)) settings.selection = saved.selection;
+    const schedule = ['dayStart', 'sunsetStart', 'nightStart'].map(key => saved[key]);
+    if (schedule.every(Number.isFinite) && schedule[0] >= 0 && schedule[0] < schedule[1]
+        && schedule[1] < schedule[2] && schedule[2] <= 24)
+        for (const key of ['dayStart', 'sunsetStart', 'nightStart']) settings[key] = saved[key];
+    for (const sky of Object.keys(SKY_OPTIONS))
+        if (['room', 'lip', 'bottom', 'band', 'screen'].includes(saved.colorTargets?.[sky])) settings.colorTargets[sky] = saved.colorTargets[sky];
+    for (const sky of Object.keys(SKY_OPTIONS)) for (const mode of ['on', 'off']) {
+        for (const [key, [, min, max]] of Object.entries({ ...SKY_CONTROLS, bandHue: ['Band hue', 0, 359], bandSaturation: ['Band saturation', 0, 100], bandValue: ['Band value', 0, 1], value: ['Room color value', 0, 1], lipValue: ['Lip color value', 0, 1], bottomHue: ['Underside hue', 0, 359], bottomSaturation: ['Underside saturation', 0, 100], bottomValue: ['Underside value', 0, 1], lipHue: ['Lip hue', 0, 359], lipSaturation: ['Lip saturation', 0, 100] })) {
+            const value = saved.profiles?.[sky]?.[mode]?.[key];
+            if (typeof value === 'number' && Number.isFinite(value))
+                settings.profiles[sky][mode][key] = Math.max(min, Math.min(max, value));
+        }
+    }
+    for (const sky of Object.keys(SKY_OPTIONS)) for (const mode of ['on', 'off']) {
+        const key = `${sky}:${mode}`;
+        const target = saved.colorTargetsByState?.[key];
+        settings.colorTargetsByState[key] = ['room', 'lip', 'bottom', 'band', 'screen'].includes(target) ? target : settings.colorTargets[sky];
+    }
+    return settings;
+}
+
+export async function addSkyWorkshop(room, { computer = null } = {}) {
+    if (!room.app || !room.options.gallerySkylight) throw new Error('The sky workshop needs a mounted skylight gallery.');
+    const { THREE, scene, textureLoader, canvas, camera, orbit, roomLights } = room.app;
+    const defaults = createSkySettings(room.options);
+    let saved;
+    try { saved = JSON.parse(localStorage.getItem(SKY_WORKSHOP_STORAGE_KEY)); } catch { }
+    let settings = restoreSkySettings(saved, defaults);
+    // Let the gallery finish setting its original background before replacing it.
+    await room.skylightSkyReady;
+    const originalBackground = scene.background;
+    const originalIntensity = scene.backgroundIntensity;
+    const textures = {};
+    const results = await Promise.allSettled(Object.entries(SKY_OPTIONS).map(async ([key, sky]) => {
+        const texture = await textureLoader.loadAsync(new URL(sky.path, import.meta.url).href);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.magFilter = texture.minFilter = THREE.NearestFilter;
+        textures[key] = texture;
+    }));
+    const failure = results.find(result => result.status === 'rejected');
+    if (failure) { Object.values(textures).forEach(texture => texture.dispose()); throw failure.reason; }
+    const style = document.createElement('style');
+    style.textContent = SKY_WORKSHOP_STYLES; document.head.appendChild(style);
+    const panel = document.createElement('dialog');
+    panel.id = 'sky-workshop'; panel.className = 'wall-image-editor';
+    panel.setAttribute('aria-labelledby', 'sky-workshop-title');
+    panel.innerHTML = makePanel();
+    room.stage.appendChild(panel);
+    const form = panel.querySelector('form'), fields = form.elements;
+    const controller = new AbortController();
+    const listen = (target, type, handler, capture = false) =>
+        target.addEventListener(type, handler, { capture, signal: controller.signal });
+    const save = () => { try { localStorage.setItem(SKY_WORKSHOP_STORAGE_KEY, JSON.stringify(settings)); } catch { } };
+    let currentSky = '', mode = roomLights.isOn() ? 'on' : 'off';
+    const ambient = scene.children.find(object => object.isAmbientLight && object !== room.skylightDaylight);
+    const directional = scene.children.find(object => object.isDirectionalLight);
+    const lightColors = new Map([ambient, directional, room.galleryFillLight, room.skylightDaylight]
+        .filter(Boolean).map(light => [light, light.color.clone()]));
+    const surfaces = Object.fromEntries(Object.entries(room.materials).map(([name, material]) =>
+        [name, { material, color: material.color.clone() }]));
+    const reveal = Array.isArray(room.layout.ceiling.material) ? room.layout.ceiling.material[1] : null;
+    const revealColor = reveal?.color.clone();
+    const trim = room.layout.skylightLip?.children[0]?.material;
+    const trimColor = trim?.color.clone();
+    // BoxGeometry face 3 faces down. Give only that face an independent material.
+    const bottomFaces = (room.layout.skylightLip?.children ?? []).map(mesh => {
+        const original = mesh.material, bottom = original.clone(), band = original.clone();
+        mesh.material = [band, band, original, bottom, band, band];
+        return { mesh, original, bottom, band };
+    });
+    const lines = scene.children.filter(object => object.isLineSegments);
+    const edgeColor = (object, on) => object.name === 'skylight-edge-lines'
+        ? (on ? room.options.skylightLipEdgeColor : room.options.skylightLipOffEdgeColor)
+        : object.name === 'skylight-vertical-lines'
+            ? (on ? room.options.skylightEdgeColor : room.options.skylightOffEdgeColor)
+            : (on ? room.options.cornerLines : room.options.galleryOffEdgeColor);
+    const baseLines = new Map(lines.map(line => [line, {
+        on: new THREE.Color(typeof edgeColor(line, true) === 'number' ? edgeColor(line, true) : 0xc4c4c8),
+        off: new THREE.Color(edgeColor(line, false) ?? 0x757575),
+    }]));
+    let disposed = false;
+    const wheel = panel.querySelector('canvas'), wheelContext = wheel.getContext('2d');
+    drawWheel(wheel, wheelContext);
+    const profile = () => settings.profiles[currentSky][mode];
+    const format = (key, value) => key.endsWith('Hue') || key === 'hue' ? `${value.toFixed(0)}°`
+        : key === 'saturation' ? `${value.toFixed(0)}%` : value.toFixed(2);
+    const computerProfile = () => mode === 'off' && currentSky === 'stars' ? 'starsOff' : mode;
+    const computerControls = {
+        shadowX: ['Shadow X offset', -120, 120, 0.1], shadowY: ['Shadow Y offset', -120, 120, 0.1],
+        shadowZ: ['Shadow Z offset', -120, 120, 0.1], shadowReach: ['Size / reach', 1, 240, 1],
+        shadowMoldingStrength: ['Baseboard shadow multiplier (0 off, 1 normal)', 0, 2, 0.1],
+        shadowStrength: ['Strength', 0, 30, 0.1], shadowDecay: ['Falloff', 0, 4, 0.1],
+    };
+    const computerSection = panel.querySelector('[data-computer-shadow]');
+    computerSection.hidden = !computer;
+    if (computer) {
+        computerSection.insertAdjacentHTML('beforeend', Object.entries(computerControls).map(([key, [label, min, max, step]]) =>
+            `<label class="sky-slider"><span>${label}</span><input name="computer-${key}" aria-label="Computer shadow ${label}" type="range" min="${min}" max="${max}" step="${step}"><output data-computer-output="${key}"></output></label>`).join(''));
+    }
+    const syncComputerControls = () => {
+        if (!computer) return;
+        const values = computer.getLighting(computerProfile());
+        values.shadowMoldingStrength ??= computer.getLighting(mode).shadowMoldingStrength;
+        computerSection.querySelector('legend').textContent = `Computer shadow · ${SKY_OPTIONS[currentSky].label} · lights ${mode}`;
+        for (const key of Object.keys(computerControls)) {
+            fields[`computer-${key}`].value = values[key];
+            panel.querySelector(`[data-computer-output="${key}"]`).textContent =
+                `${values[key].toFixed(1)}${['shadowStrength', 'shadowDecay', 'shadowMoldingStrength'].includes(key) ? '' : ' in'}`;
+        }
+    };
+    // Cylinders give the four inside lines a real thickness; WebGL line width is usually fixed at 1px.
+    const originalVerticals = scene.getObjectByName('skylight-vertical-lines');
+    const cornerGroup = new THREE.Group();
+    cornerGroup.name = 'workshop-skylight-corner-lines';
+    const cornerGeometry = new THREE.CylinderGeometry(1, 1, 1, 8);
+    const cornerMaterial = new THREE.MeshBasicMaterial({ color: 0x666666, toneMapped: false });
+    const cornerLengths = [];
+    if (originalVerticals) {
+        const positions = originalVerticals.geometry.getAttribute('position');
+        for (let i = 0; i < positions.count; i += 2) {
+            const from = new THREE.Vector3().fromBufferAttribute(positions, i);
+            const to = new THREE.Vector3().fromBufferAttribute(positions, i + 1);
+            const direction = to.clone().sub(from), length = direction.length();
+            const mesh = new THREE.Mesh(cornerGeometry, cornerMaterial);
+            mesh.position.copy(from).add(to).multiplyScalar(0.5);
+            mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize());
+            cornerGroup.add(mesh); cornerLengths.push(length);
+        }
+        originalVerticals.visible = false;
+    }
+    scene.add(cornerGroup);
+    let colorTarget = 'room';
+    const selectedColor = () => colorTarget === 'screen' && computer
+        ? computer.getScreenLight() : colorTarget === 'band'
+            ? { hue: profile().bandHue, saturation: profile().bandSaturation, value: profile().bandValue } : colorTarget === 'bottom'
+            ? { hue: profile().bottomHue, saturation: profile().bottomSaturation, value: profile().bottomValue } : colorTarget === 'lip'
+            ? { hue: profile().lipHue, saturation: profile().lipSaturation, value: profile().lipValue } : profile();
+    const setSelectedColor = (hue, saturation, value = 1) => {
+        if (colorTarget === 'screen' && computer) computer.setScreenLight({ hue, saturation });
+        else if (colorTarget === 'band') Object.assign(profile(), { bandHue: hue, bandSaturation: saturation, bandValue: value });
+        else if (colorTarget === 'bottom') Object.assign(profile(), { bottomHue: hue, bottomSaturation: saturation, bottomValue: value });
+        else if (colorTarget === 'lip') Object.assign(profile(), { lipHue: hue, lipSaturation: saturation, lipValue: value });
+        else Object.assign(profile(), { hue, saturation, value });
+    };
+    const screenControls = { intensity: ['Light intensity', 0, 30, 0.1], reach: ['Size / reach (inches)', 1, 240, 1],
+        decay: ['Falloff', 0, 4, 0.1], x: ['Right / left offset (inches)', -120, 120, 0.1],
+        y: ['Height above computer base (inches)', -120, 120, 0.1], z: ['In front of screen (inches)', -120, 120, 0.1] };
+    const screenSection = panel.querySelector('[data-screen-light]');
+    screenSection.hidden = !computer;
+    fields.colorTarget.querySelector('[value="screen"]').disabled = !computer;
+    if (computer) screenSection.insertAdjacentHTML('beforeend', Object.entries(screenControls).map(([key, [label, min, max, step]]) =>
+        `<label class="sky-slider"><span>${label}</span><input name="screen-${key}" aria-label="Screen ${label}" type="range" min="${min}" max="${max}" step="${step}"><output data-screen-output="${key}"></output></label>`).join(''));
+    const syncScreenControls = () => {
+        if (!computer) return;
+        const values = computer.getScreenLight();
+        fields.screenEnabled.checked = values.enabled;
+        fields.screenPreview.checked = values.preview;
+        for (const key of Object.keys(screenControls)) {
+            fields[`screen-${key}`].value = values[key];
+            panel.querySelector(`[data-screen-output="${key}"]`).textContent = values[key].toFixed(1);
+        }
+    };
+    // Read live component values so the preview and clipboard always describe the same state.
+    const exportSettings = () => ({
+        version: 1, sky: currentSky, skyLabel: SKY_OPTIONS[currentSky]?.label,
+        skyImage: SKY_OPTIONS[currentSky]?.path, lightsOn: mode === 'on',
+        selection: settings.selection,
+        schedule: { dayStart: settings.dayStart, sunsetStart: settings.sunsetStart, nightStart: settings.nightStart },
+        colorTarget, lighting: structuredClone(profile()), computer: computer?.getSettings() ?? null,
+    });
+    const exportAllSettings = () => ({
+        version: 1, selection: settings.selection,
+        schedule: { dayStart: settings.dayStart, sunsetStart: settings.sunsetStart, nightStart: settings.nightStart },
+        skies: Object.fromEntries(Object.entries(SKY_OPTIONS).map(([sky, info]) => [sky, {
+            label: info.label, skyImage: info.path,
+            states: Object.fromEntries(['on', 'off'].map(state => [state, {
+                lightsOn: state === 'on',
+                colorTarget: settings.colorTargetsByState[`${sky}:${state}`] ?? 'room',
+                lighting: structuredClone(settings.profiles[sky][state]),
+                computer: computer?.getSettings(sky, state) ?? null,
+            }])),
+        }])),
+    });
+    const syncJson = () => {
+        for (const input of panel.querySelectorAll('[data-range-input]')) {
+            if (document.activeElement !== input) input.value = fields[input.dataset.rangeInput].value;
+        }
+        panel.querySelector('[data-settings-json]').textContent = JSON.stringify(exportSettings(), null, 2);
+        panel.querySelector('[data-all-settings-json]').textContent = JSON.stringify(exportAllSettings(), null, 2);
+    };
+    const syncFields = () => {
+        syncComputerControls(); syncScreenControls();
+        fields.colorTarget.value = colorTarget;
+        fields.skySelection.value = settings.selection;
+        fields.lightsOn.checked = mode === 'on';
+        for (const key of ['dayStart', 'sunsetStart', 'nightStart']) fields[key].value = settings[key];
+        for (const [key, value] of Object.entries(profile())) {
+            if (!Object.hasOwn(SKY_CONTROLS, key)) continue;
+            fields[key].value = value;
+            panel.querySelector(`[data-output="${key}"]`).textContent = format(key, value);
+        }
+        panel.querySelector('legend[data-profile]').textContent = `${SKY_OPTIONS[currentSky].label} · lights ${mode}`;
+        const color = selectedColor();
+        fields.hue.value = color.hue; fields.saturation.value = color.saturation;
+        panel.querySelector('[data-output="hue"]').textContent = format('hue', color.hue);
+        panel.querySelector('[data-output="saturation"]').textContent = format('saturation', color.saturation);
+        const rgb = hsvToRgb(color.hue, color.saturation / 100, color.value ?? 1);
+        const hex = '#' + rgb.map(value => Math.round(value * 255).toString(16).padStart(2, '0')).join('');
+        if (document.activeElement !== fields.hexColor) fields.hexColor.value = hex;
+        panel.querySelector('[data-color]').style.backgroundColor = hex;
+        panel.querySelector('[data-color]').style.color = rgb.reduce((a, b) => a + b) > 1.5 ? '#111' : 'white';
+        const angle = color.hue * Math.PI / 180, radius = color.saturation / 100 * 50;
+        const marker = panel.querySelector('[data-wheel-marker]');
+        marker.style.left = `${50 + Math.cos(angle) * radius}%`;
+        marker.style.top = `${50 + Math.sin(angle) * radius}%`;
+        syncJson();
+        wheel.setAttribute('aria-valuetext', `Hue ${color.hue.toFixed(0)} degrees, saturation ${color.saturation.toFixed(0)} percent`);
+    };
+    const apply = () => {
+        const p = profile(), tint = new THREE.Color().setRGB(...hsvToRgb(p.hue, p.saturation / 100, p.value), THREE.SRGBColorSpace);
+        scene.background = textures[currentSky];
+        scene.backgroundIntensity = p.sky;
+        for (const [light, base] of lightColors) light.color.copy(base).multiply(tint);
+        if (ambient) ambient.intensity = p.ambient * p.room;
+        if (directional) directional.intensity = p.directional * p.room;
+        if (room.galleryFillLight) room.galleryFillLight.intensity = p.fill * p.room;
+        if (room.skylightDaylight) room.skylightDaylight.intensity = p.daylight * p.room;
+        room.skylightTreeMaterial?.color.setScalar(p.trees);
+        room.skylightOutside?.traverse(object => {
+            if (object.isLineSegments) object.material.color.setHex(0x333333).multiplyScalar(p.trees);
+        });
+        for (const [key, surface] of Object.entries(surfaces)) surface.material.color.copy(surface.color).multiplyScalar(p[key]);
+        const lipTint = new THREE.Color().setRGB(...hsvToRgb(p.lipHue, p.lipSaturation / 100, p.lipValue), THREE.SRGBColorSpace);
+        if (reveal) reveal.color.copy(revealColor).multiply(lipTint).multiplyScalar(p.reveal);
+        if (trim) trim.color.copy(trimColor).multiply(lipTint).multiplyScalar(p.trim);
+        const bottomTint = new THREE.Color().setRGB(...hsvToRgb(p.bottomHue, p.bottomSaturation / 100, p.bottomValue), THREE.SRGBColorSpace);
+        for (const { bottom } of bottomFaces) bottom.color.copy(trim.color).multiply(bottomTint).multiplyScalar(p.lipBottom);
+        const bandTint = new THREE.Color().setRGB(...hsvToRgb(p.bandHue, p.bandSaturation / 100, p.bandValue), THREE.SRGBColorSpace);
+        for (const { band } of bottomFaces) band.color.copy(trim.color).multiply(bandTint).multiplyScalar(p.lipBand);
+        cornerMaterial.color.setHex(mode === 'on' ? room.options.skylightEdgeColor : room.options.skylightOffEdgeColor)
+            .multiply(lipTint).multiplyScalar(p.verticalBrightness);
+        cornerGroup.visible = p.verticalThickness > 0;
+        cornerGroup.children.forEach((mesh, i) => mesh.scale.set(p.verticalThickness / 40, cornerLengths[i], p.verticalThickness / 40));
+        for (const [line, base] of baseLines) line.material.color.copy(base[mode])
+            .multiplyScalar(line.name.startsWith('skylight-') ? p.edges : p.roomEdges);
+        scene.traverse(object => {
+            if (!object.userData.isLightFixture) return;
+            const face = object.material[3];
+            face.color.setScalar(p.fixtures);
+            if (mode === 'on') face.emissive.setRGB(14, 13.2, 11.5).multiply(tint).multiplyScalar(p.fixtureGlow);
+            else face.emissive.copy(tint).multiplyScalar(p.fixtureGlow);
+        });
+    };
+    const tick = () => {
+        if (disposed) return;
+        const now = new Date(), hour = now.getHours() + now.getMinutes() / 60;
+        const sky = settings.selection === 'auto' ? getSkyForHour(hour, settings) : settings.selection;
+        panel.querySelector('[data-clock]').textContent = `Browser time: ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${SKY_OPTIONS[sky].label}`;
+        if (sky !== currentSky) {
+            currentSky = sky;
+            colorTarget = settings.colorTargetsByState[`${sky}:${mode}`] ?? settings.colorTargets[sky];
+            if (colorTarget === 'screen' && !computer) colorTarget = 'room';
+            computer?.setSky(currentSky);
+            apply(); syncFields();
+        }
+    };
+    // Pair every slider with a numeric field; native arrows use finer increments.
+    for (const range of panel.querySelectorAll('input[type="range"]')) {
+        const input = document.createElement('input');
+        input.type = 'number'; input.min = range.min; input.max = range.max;
+        input.step = String(Number(range.step) / 10); input.dataset.rangeInput = range.name;
+        input.setAttribute('aria-label', `${range.getAttribute('aria-label') ?? range.name} precise value`);
+        range.step = input.step;
+        range.insertAdjacentElement('afterend', input);
+        listen(input, 'input', event => {
+            event.stopPropagation();
+            if (input.value === '' || !input.validity.valid) return;
+            range.value = input.value;
+            range.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+    }
+    listen(fields.hexColor, 'change', () => {
+        const hex = fields.hexColor.value.trim();
+        if (!/^#[0-9a-f]{6}$/i.test(hex)) {
+            fields.hexColor.setCustomValidity('Enter a six-digit hex color, such as #d3e8ff.');
+            fields.hexColor.reportValidity(); return;
+        }
+        fields.hexColor.setCustomValidity('');
+        const rgb = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
+        const max = Math.max(...rgb), min = Math.min(...rgb), delta = max - min;
+        let hue = 0;
+        if (delta) hue = 60 * (max === rgb[0] ? ((rgb[1] - rgb[2]) / delta + 6) % 6
+            : max === rgb[1] ? (rgb[2] - rgb[0]) / delta + 2 : (rgb[0] - rgb[1]) / delta + 4);
+        setSelectedColor(hue, max ? delta / max * 100 : 0, max);
+        apply(); syncFields(); save();
+    });
+    listen(fields.hexColor, 'input', () => fields.hexColor.setCustomValidity(''));
+    tick();
+    const unsubscribe = roomLights.onChange(on => { mode = on ? 'on' : 'off'; colorTarget = settings.colorTargetsByState[`${currentSky}:${mode}`] ?? 'room'; apply(); if (panel.open) syncFields(); });
+    const timer = setInterval(tick, 30000);
+    listen(form, 'input', event => {
+        const key = event.target.name;
+        if (computer && key === 'screenPreview') {
+            computer.setScreenLightPreview(event.target.checked); syncScreenControls(); return;
+        }
+        if (computer && key === 'screenEnabled') {
+            computer.setScreenLight({ enabled: event.target.checked }); syncScreenControls(); return;
+        }
+        if (computer && key.startsWith('screen-')) {
+            computer.setScreenLight({ [key.slice(7)]: Number(event.target.value) });
+            syncScreenControls(); return;
+        }
+        if (key === 'hue' || key === 'saturation') {
+            const color = selectedColor();
+            setSelectedColor(key === 'hue' ? Number(event.target.value) : color.hue,
+                key === 'saturation' ? Number(event.target.value) : color.saturation);
+            apply(); syncFields(); save(); return;
+        }
+        if (computer && key.startsWith('computer-')) {
+            computer.setLighting(computerProfile(), { [key.slice('computer-'.length)]: Number(event.target.value) });
+            syncComputerControls();
+            return;
+        }
+        if (!Object.hasOwn(SKY_CONTROLS, key)) return;
+        profile()[key] = Number(event.target.value);
+        apply(); syncFields(); save();
+    });
+    listen(fields.colorTarget, 'change', () => {
+        colorTarget = fields.colorTarget.value; settings.colorTargetsByState[`${currentSky}:${mode}`] = colorTarget; syncFields(); save();
+    });
+    listen(fields.skySelection, 'change', () => { settings.selection = fields.skySelection.value; tick(); apply(); syncFields(); save(); });
+    listen(fields.lightsOn, 'change', () => { room.setLights(fields.lightsOn.checked); });
+    for (const key of ['dayStart', 'sunsetStart', 'nightStart']) listen(fields[key], 'change', () => {
+        const [dayStart, sunsetStart, nightStart] = ['dayStart', 'sunsetStart', 'nightStart'].map(key => Number(fields[key].value));
+        if (!(dayStart >= 0 && dayStart < sunsetStart && sunsetStart < nightStart && nightStart <= 24)) {
+            panel.querySelector('[data-status]').textContent = 'Use increasing hours: day < sunset < night, between 0 and 24.';
+            return;
+        }
+        Object.assign(settings, { dayStart, sunsetStart, nightStart });
+        panel.querySelector('[data-status]').textContent = ''; tick(); save();
+    });
+    listen(fields.previewComputerShadow, 'click', () => {
+        room.setLights(false);
+    });
+    listen(fields.defaults, 'click', () => {
+        settings.profiles[currentSky][mode] = structuredClone(defaults.profiles[currentSky][mode]);
+        colorTarget = settings.colorTargetsByState[`${currentSky}:${mode}`] = defaults.colorTargetsByState[`${currentSky}:${mode}`];
+        computer?.restoreSkyDefaults();
+        apply(); syncFields(); save();
+    });
+    // These listeners run after the control handlers have applied their new values.
+    listen(form, 'input', syncJson);
+    listen(form, 'change', syncJson);
+    listen(panel.querySelector('[data-json-details]'), 'toggle', syncJson);
+    const copySettings = async all => {
+        syncJson();
+        const text = JSON.stringify(all ? exportAllSettings() : exportSettings(), null, 2);
+        const status = panel.querySelector('[data-copy-status]');
+        try {
+            await navigator.clipboard.writeText(text);
+            status.textContent = all ? 'All sky / light states copied.' : 'Current state copied.';
+        } catch {
+            panel.querySelector(all ? '[data-all-json-details]' : '[data-json-details]').open = true;
+            status.textContent = 'Clipboard unavailable. Select and copy the JSON below.';
+        }
+    };
+    listen(fields.copyJson, 'click', () => copySettings(false));
+    listen(fields.copyAllJson, 'click', () => copySettings(true));
+    listen(panel, 'keydown', event => {
+        event.stopPropagation();
+        // Nonmodal dialogs need an explicit Escape handler.
+        if (event.key === 'Escape') { event.preventDefault(); panel.close(); }
+    });
+    // Keep the exposed room interactive while the workshop controls remain open.
+    const open = () => { tick(); syncFields(); if (!panel.open) panel.show(); };
+    // Reuse the existing gear in this test room without toggling developer mode beneath it.
+    const gear = room.stage.querySelector('#dev-toggle');
+    const gearLabel = gear?.getAttribute('aria-label'), gearTitle = gear?.title;
+    if (gear) {
+        gear.title = 'sky and lighting controls';
+        gear.setAttribute('aria-label', 'Open sky and lighting controls');
+        listen(gear, 'click', event => { event.stopImmediatePropagation(); open(); }, true);
+    }
+    // The wheel and the numeric hue/saturation sliders always update the same values.
+    let pickingColor = false;
+    const pickColor = event => {
+        const rect = wheel.getBoundingClientRect(), x = (event.clientX - rect.left) / rect.width * 2 - 1,
+            y = (event.clientY - rect.top) / rect.height * 2 - 1;
+        setSelectedColor(((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360,
+            Math.min(1, Math.hypot(x, y)) * 100);
+        apply(); syncFields(); save();
+    };
+    listen(wheel, 'pointerdown', event => {
+        if (event.button !== 0) return;
+        pickingColor = true; wheel.setPointerCapture(event.pointerId); pickColor(event);
+    });
+    listen(wheel, 'pointermove', event => { if (pickingColor) pickColor(event); });
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) listen(wheel, type, () => { pickingColor = false; });
+    listen(wheel, 'keydown', event => {
+        const p = { ...selectedColor() }, step = event.shiftKey ? 10 : 1;
+        if (event.key === 'ArrowLeft') p.hue = (p.hue - step + 360) % 360;
+        else if (event.key === 'ArrowRight') p.hue = (p.hue + step) % 360;
+        else if (event.key === 'ArrowUp') p.saturation = Math.min(100, p.saturation + step);
+        else if (event.key === 'ArrowDown') p.saturation = Math.max(0, p.saturation - step);
+        else return;
+        event.preventDefault(); setSelectedColor(p.hue, p.saturation); apply(); syncFields(); save();
+    });
+    bindSkyClick({ room, THREE, canvas, camera, scene, orbit, listen, open });
+    return { open, dispose() {
+        disposed = true; clearInterval(timer); unsubscribe(); controller.abort();
+        computer?.setScreenLightPreview(false);
+        computer?.setSky(null);
+        panel.close(); panel.remove(); style.remove();
+        scene.remove(cornerGroup); cornerGeometry.dispose(); cornerMaterial.dispose();
+        if (originalVerticals) originalVerticals.visible = true;
+        if (gear) {
+            gear.title = gearTitle;
+            if (gearLabel == null) gear.removeAttribute('aria-label'); else gear.setAttribute('aria-label', gearLabel);
+        }
+        // Restore the room's own light settings before removing the sky editor.
+        for (const [light, color] of lightColors) light.color.copy(color);
+        for (const surface of Object.values(surfaces)) surface.material.color.copy(surface.color);
+        if (reveal) reveal.color.copy(revealColor); if (trim) trim.color.copy(trimColor);
+        for (const { mesh, original, bottom, band } of bottomFaces) { mesh.material = original; bottom.dispose(); band.dispose(); }
+        room.skylightTreeMaterial?.color.setScalar(1);
+        roomLights.setOn(roomLights.isOn());
+        scene.background = originalBackground; scene.backgroundIntensity = originalIntensity;
+        Object.values(textures).forEach(texture => texture.dispose());
+    } };
+}
+
+function drawWheel(canvas, context) {
+    const size = canvas.width, radius = size / 2, image = context.createImageData(size, size);
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+        const dx = (x + 0.5 - radius) / radius, dy = (y + 0.5 - radius) / radius, distance = Math.hypot(dx, dy);
+        if (distance > 1) continue;
+        const rgb = hsvToRgb(Math.atan2(dy, dx) * 180 / Math.PI, distance);
+        const index = (y * size + x) * 4;
+        rgb.forEach((value, channel) => { image.data[index + channel] = Math.round(value * 255); });
+        image.data[index + 3] = 255;
+    }
+    context.putImageData(image, 0, 0);
+}
+
+function bindSkyClick({ room, THREE, canvas, camera, scene, orbit, listen, open }) {
+    const ray = new THREE.Raycaster(), pointer = new THREE.Vector2(), point = new THREE.Vector3();
+    let press = null;
+    const cancel = () => { press = null; };
+    listen(canvas, 'pointerdown', event => {
+        if (event.button !== 0 || event.isPrimary === false) { cancel(); return; }
+        const rect = canvas.getBoundingClientRect();
+        pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -(event.clientY - rect.top) / rect.height * 2 + 1);
+        ray.setFromCamera(pointer, camera);
+        if (ray.ray.direction.y <= 0) return;
+        const top = room.layout.ceilingY + room.options.skylightThickness / 20;
+        const distance = (top - ray.ray.origin.y) / ray.ray.direction.y;
+        if (distance <= 0) return;
+        ray.ray.at(distance, point);
+        const half = room.options.skylightWidth * 12 / 20 / 2;
+        if (Math.abs(point.x) >= half || Math.abs(point.z) >= half) return;
+        // The click must pass through the hole, not a fixture, artwork, or the lip in front of it.
+        const obstructed = ray.intersectObjects(scene.children, true).some(hit => {
+            if (hit.distance >= distance - 0.01 || !hit.object.isMesh) return false;
+            for (let object = hit.object; object; object = object.parent) if (!object.visible) return false;
+            return true;
+        });
+        if (obstructed) return;
+        event.stopImmediatePropagation();
+        press = { id: event.pointerId, x: event.clientX, y: event.clientY, lastX: event.clientX, dragged: false };
+        canvas.setPointerCapture(event.pointerId);
+    }, true);
+    listen(canvas, 'pointermove', event => {
+        if (!press || press.id !== event.pointerId) return;
+        event.stopImmediatePropagation();
+        if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 4) press.dragged = true;
+        if (press.dragged) {
+            const delta = (event.clientX - press.lastX) * 0.005;
+            orbit.setAngle(orbit.getAngle() + delta); room._onUserRotate(delta);
+        }
+        press.lastX = event.clientX;
+    }, true);
+    listen(canvas, 'pointerup', event => {
+        if (!press || press.id !== event.pointerId) return;
+        event.stopImmediatePropagation();
+        const clicked = !press.dragged; cancel();
+        if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+        if (clicked) open();
+    }, true);
+    for (const type of ['pointercancel', 'lostpointercapture']) listen(canvas, type, cancel, true);
+    listen(window, 'blur', cancel);
+}
+
+function makePanel() {
+    const sliders = Object.entries(SKY_CONTROLS).map(([key, [label, min, max, step]]) =>
+        `<label class="sky-slider"><span>${label}</span><input name="${key}" aria-label="${label}" type="range" min="${min}" max="${max}" step="${step}"><output data-output="${key}"></output></label>`).join('');
+    return `<form method="dialog">
+        <div class="wall-editor-header"><span id="sky-workshop-title" class="wall-editor-filename">sky / lighting workshop</span>
+            <button name="close" aria-label="close sky controls">x</button></div>
+        <p data-clock></p>
+        <label>Sky <select name="skySelection"><option value="auto">Automatic · browser local time</option>${Object.entries(SKY_OPTIONS).map(([key, sky]) => `<option value="${key}">${sky.label}</option>`).join('')}</select></label>
+        <details><summary>Automatic schedule (local hours)</summary>
+            <p>Day → sunset → stars. No location permission is needed.</p>
+            <label>Day starts <input name="dayStart" type="number" min="0" max="24" step="0.5"></label>
+            <label>Sunset starts <input name="sunsetStart" type="number" min="0" max="24" step="0.5"></label>
+            <label>Night starts <input name="nightStart" type="number" min="0" max="24" step="0.5"></label>
+        </details>
+        <label><input name="lightsOn" type="checkbox"> Lights on</label>
+        <fieldset><legend data-profile></legend>
+            <p>Settings save separately for each sky and light state. 0 is dark; 1 is normal for surface brightness.</p>
+            <label>Color picker controls <select name="colorTarget"><option value="room">Room light</option><option value="lip">Skylight lip / inside opening</option><option value="band">Skylight lip side band</option><option value="bottom">Skylight lip underside</option><option value="screen">Computer screen light</option></select></label>
+            <div class="sky-wheel"><canvas width="200" height="200" tabindex="0" role="slider" aria-label="Light hue and saturation" aria-valuemin="0" aria-valuemax="359"></canvas><span data-wheel-marker></span></div>
+            <label>Hex color <input data-color name="hexColor" type="text" maxlength="7" spellcheck="false" aria-label="Hex color"></label><p>Wheel: hue around the edge, saturation toward the rim. Arrow keys also adjust the color.</p>
+            ${sliders}
+        </fieldset>
+        <fieldset data-screen-light hidden><legend>Computer screen light</legend>
+            <label>Enabled while computer is on <input name="screenEnabled" type="checkbox"></label><br>
+            <label>Preview light while computer is off <input name="screenPreview" type="checkbox"></label>
+            <p>Offsets follow the computer's rotation. Positive Z is in front of the screen. Set its hue using the color picker dropdown above.</p>
+        </fieldset>
+        <fieldset data-computer-shadow hidden><legend>Computer shadow · current sky / light state</legend>
+            <p>These controls edit the selected sky and current electric-light state only. Each sky keeps its own computer settings.</p>
+            <button type="button" name="previewComputerShadow">preview current sky with lights off</button>
+        </fieldset>
+        <details data-json-details><summary>Current sky / light state JSON</summary><pre data-settings-json tabindex="0" aria-label="Current settings JSON"></pre></details>
+        <button type="button" name="copyJson">copy current state JSON</button>
+        <details data-all-json-details><summary>All skies / light states JSON</summary><pre data-all-settings-json tabindex="0" aria-label="All settings JSON"></pre></details>
+        <button type="button" name="copyAllJson">copy all skies / light states JSON</button>
+        <span role="status" data-copy-status></span>
+        <div role="status" data-status></div>
+        <div class="wall-editor-actions"><button type="button" name="defaults">restore current sky / light state defaults</button><button>done</button></div>
+    </form>`;
+}

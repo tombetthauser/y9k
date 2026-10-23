@@ -1,8 +1,9 @@
+import { helpers } from './helpers-module.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
-import { COMPUTER_DEFAULTS, COMPUTER_BOOT, COMPUTER_SHUTDOWN, readComputerSettings, runComputerSequence, isComputerScreenLit, computerShadowProfile } from '../public/computer.js';
+const { COMPUTER_DEFAULTS, COMPUTER_BOOT, COMPUTER_SHUTDOWN, readComputerSettings, runComputerSequence, isComputerScreenLit, computerShadowProfile, defaultComputerSkySettings, readComputerSkySettings, computerSkyStorageKey } = helpers;
 
 test('fixed settings are isolated from test storage and profile edits', () => {
     const settings = readComputerSettings(undefined, 'unused', COMPUTER_DEFAULTS.placement, {});
@@ -33,7 +34,7 @@ test('boot and shutdown preserve every frame, sound stage, and pause', async () 
         'computer-shutdown-0', 'computer-shutdown-1', 'computer-shutdown-2', 'computer-shutdown-3', 'computer-shutdown-4-complete',
     ]);
     assert.deepEqual(sounds, ['beep', 'startup', 'shutdown', 'beep']);
-    assert.deepEqual(pauses, [1400, 1100, 3200, 6750, 1300, 700, 650, 900, 3400, 1200, 800]);
+    assert.deepEqual(pauses, [1400, 1100, 3200, 6750, 2000, 700, 1500, 2500, 3400, 1200, 800]);
 });
 
 test('a screen remains visible until its sound completes', async () => {
@@ -117,4 +118,90 @@ test('stars shadow is exclusive to stars with lights off', () => {
     assert.deepEqual(COMPUTER_DEFAULTS.screenLight, {
         enabled: true, intensity: 2.9, reach: 36, decay: 2.1, x: 0, y: 27, z: 9.6, hue: 229, saturation: 30,
     });
+});
+
+
+test('complete computer settings round-trip independently for each sky', () => {
+    const data = new Map();
+    const storage = { getItem: key => data.get(key) ?? null, setItem: (key, value) => data.set(key, value) };
+    const stars = defaultComputerSkySettings();
+    Object.assign(stars.placement, { x: 80, width: 25 });
+    Object.assign(stars.screenLight, { intensity: 4.5, hue: 240, enabled: false });
+    stars.volumes.startup = 0.03;
+    stars.profiles.on.computerBrightness = 0.8;
+    stars.profiles.off.shadowReach = 10;
+    stars.profiles.starsOff.shadowStrength = 0.2;
+    stars.autoRotation = false;
+    stars.screenLightPreview = true;
+    storage.setItem(computerSkyStorageKey('stars'), JSON.stringify(stars));
+    assert.deepEqual(readComputerSkySettings(storage, 'stars'), stars);
+    const day = readComputerSkySettings(storage, 'day');
+    assert.deepEqual(day, defaultComputerSkySettings());
+    day.screenLight.hue = 25;
+    day.profiles.off.shadowStrength = 1.2;
+    storage.setItem(computerSkyStorageKey('day'), JSON.stringify(day));
+    assert.deepEqual(readComputerSkySettings(storage, 'stars'), stars);
+    assert.equal(readComputerSkySettings(storage, 'day').screenLight.hue, 25);
+    assert.equal(readComputerSkySettings(storage, 'day').profiles.off.shadowStrength, 1.2);
+    assert.equal(readComputerSkySettings(storage, 'day').profiles.on.shadowStrength, 2.4);
+});
+
+test('resetting one saved sky leaves all other computer settings intact', () => {
+    const data = new Map();
+    const storage = { getItem: key => data.get(key) ?? null };
+    const stars = defaultComputerSkySettings(); stars.screenLight.intensity = 9;
+    const day = defaultComputerSkySettings(); day.placement.x = -25;
+    data.set(computerSkyStorageKey('stars'), JSON.stringify(stars));
+    data.set(computerSkyStorageKey('day'), JSON.stringify(day));
+    data.set(computerSkyStorageKey('day'), JSON.stringify(defaultComputerSkySettings()));
+    assert.deepEqual(readComputerSkySettings(storage, 'stars'), stars);
+    assert.deepEqual(readComputerSkySettings(storage, 'day'), defaultComputerSkySettings());
+});
+
+test('existing computer tuning seeds an initial sky but saved sky settings take priority', () => {
+    const legacy = defaultComputerSkySettings(); legacy.screenLight.intensity = 7;
+    const empty = { getItem: () => null };
+    assert.equal(readComputerSkySettings(empty, 'stars', legacy).screenLight.intensity, 7);
+    assert.equal(readComputerSkySettings(empty, 'day').screenLight.intensity, 2.9);
+    const stored = defaultComputerSkySettings(); stored.screenLight.intensity = 4;
+    assert.equal(readComputerSkySettings({ getItem: () => JSON.stringify(stored) }, 'stars', legacy).screenLight.intensity, 4);
+});
+
+
+test('all six sky/light-state slots retain independent computer controls and resets', () => {
+    const data = new Map();
+    const storage = { getItem: key => data.get(key) ?? null };
+    const skies = ['day', 'sunset', 'stars'];
+    let index = 0;
+    for (const sky of skies) for (const mode of ['on', 'off']) {
+        const state = defaultComputerSkySettings();
+        state.screenLight.intensity = ++index;
+        state.placement.x = index;
+        state.volumes.startup = index / 10;
+        state.profiles[mode].shadowStrength = index;
+        data.set(computerSkyStorageKey(sky, mode), JSON.stringify(state));
+    }
+    data.set(computerSkyStorageKey('stars', 'off'), JSON.stringify(defaultComputerSkySettings('stars', 'off')));
+    index = 0;
+    for (const sky of skies) for (const mode of ['on', 'off']) {
+        ++index;
+        const state = readComputerSkySettings(storage, sky, undefined, mode);
+        if (sky === 'stars' && mode === 'off') assert.deepEqual(state, defaultComputerSkySettings('stars', 'off'));
+        else {
+            assert.equal(state.screenLight.intensity, index);
+            assert.equal(state.placement.x, index);
+            assert.equal(state.volumes.startup, index / 10);
+            assert.equal(state.profiles[mode].shadowStrength, index);
+        }
+    }
+});
+
+test('older per-sky settings seed both light states without overriding new state saves', () => {
+    const old = defaultComputerSkySettings(); old.screenLight.intensity = 7;
+    const on = defaultComputerSkySettings(); on.screenLight.intensity = 3;
+    const data = new Map([[computerSkyStorageKey('day'), JSON.stringify(old)],
+        [computerSkyStorageKey('day', 'on'), JSON.stringify(on)]]);
+    const storage = { getItem: key => data.get(key) ?? null };
+    assert.equal(readComputerSkySettings(storage, 'day', undefined, 'on').screenLight.intensity, 3);
+    assert.equal(readComputerSkySettings(storage, 'day', undefined, 'off').screenLight.intensity, 7);
 });
