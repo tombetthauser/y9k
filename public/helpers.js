@@ -7251,23 +7251,23 @@ const COMPUTER_STYLES = `
         z-index: 2;
     }
     #computer-document .document-close button {
-        width: 44px;
-        height: 44px;
+        width: 30px;
+        height: 30px;
         padding: 0;
-        border: 1px solid #ffb000;
-        border-radius: 4px;
+        border: 1px solid white;
+        border-radius: 0;
         background: black;
-        color: #ffb000;
-        font: 22px/1 Arial, sans-serif;
+        color: white;
+        font: 18px/1 Arial, sans-serif;
         box-shadow: none;
     }
     #computer-document .document-close button:active {
         padding: 0;
-        border: 1px solid #ffb000;
-        background: #241900;
+        border: 1px solid white;
+        background: #222;
     }
     #computer-document .document-close button:focus-visible {
-        outline: 1px solid #ffb000;
+        outline: 1px solid white;
         outline-offset: 3px;
     }
 }
