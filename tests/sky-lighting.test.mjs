@@ -160,6 +160,13 @@ test('door texture overrides distinguish scenarios without applying experimental
         assert.equal(helpers.doorPresentation(context).glow, 0.3);
         assert.equal(helpers.doorPresentation({ ...context, viewerOn: true }).file, 'images/door-1.jpg');
     } finally { delete helpers.DOOR_TEXTURE_OVERRIDES[key]; }
-    assert.equal(helpers.doorPresentation({ ...context, gallery: true, skylight: true, lightsOn: false }).state, 'dark');
-    assert.equal(helpers.doorPresentation({ ...context, gallery: true, skylight: true }).state, 'bright');
+    // A gallery's default door stays the same across neighboring light and sky states.
+    for (const period of ['day', 'dawn', 'evening', 'night']) {
+        for (const lightsOn of [false, true]) for (const skylight of [false, true]) {
+            const destination = { ...context, gallery: true, skylight, lightsOn, period };
+            assert.equal(helpers.doorPresentation(destination).file, 'images/door-1.jpg');
+            assert.equal(helpers.doorPresentation({ ...destination, viewerHallway: true }).state,
+                skylight ? helpers.galleryDoorState({ lightsOn, period }) : lightsOn ? 'bright' : 'dark');
+        }
+    }
 });

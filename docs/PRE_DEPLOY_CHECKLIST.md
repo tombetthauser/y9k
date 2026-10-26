@@ -1,5 +1,7 @@
 # Pre-deployment checklist
 
+Security update, October 23, 2026: complete the runtime patch and hosting verification in [SECURITY_REVIEW_2026-10.md](SECURITY_REVIEW_2026-10.md) before public exposure. The review separates urgent PHP fixes from optional hardening and the existing V2 deferrals.
+
 October 11, 2026. Estimates count added or changed lines, including comments; they are rough planning ranges, not measured patches. Detailed scope is in [V1_COMPLETION_PLAN.md](V1_COMPLETION_PLAN.md).
 
 | Order | Work | Estimated remaining lines | Dependencies |

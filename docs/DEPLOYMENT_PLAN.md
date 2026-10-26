@@ -2,6 +2,8 @@
 
 Deploy Y9K to a Raspberry Pi with SD card storage, and publish it at the root of a new custom domain through Cloudflare Tunnel.
 
+Before exposing PHP publicly, complete the runtime update and hosting verification in [the October 2026 security review](SECURITY_REVIEW_2026-10.md). This adds urgent PHP patch verification without changing the agreed V1 application scope.
+
 Remaining application scope and its implementation order are recorded in [V1_COMPLETION_PLAN.md](V1_COMPLETION_PLAN.md). The latest scope is trusted-user V1 with application upload limits, expanded validation, and resizing deferred to V2. Before deployment, complete the remaining storage, doorway rules, logging, fallback hallway image links (no hallway uploads), and admin work in the checklist.
 
 ## Agreed setup

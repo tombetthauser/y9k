@@ -47,6 +47,23 @@
     require_once __DIR__ . '/../src/database.php';
     require_once __DIR__ . '/../src/tools.php';
 
+    // Homepage visits choose a random room; editing requests keep their current behavior.
+    if (
+        in_array($_SERVER['REQUEST_METHOD'] ?? '', ['GET', 'HEAD'], true)
+        && !array_key_exists('room', $_GET)
+    ) {
+        // Use the same clean URL base as regular room navigation.
+        $roomBase = rtrim(
+            str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/index.php')),
+            '/'
+        ) . '/';
+
+        // Prevent browsers and proxies from remembering one random destination.
+        header('Cache-Control: no-store');
+        header('Location: ' . $roomBase . rawurlencode(randomRoom()), true, 302);
+        exit;
+    }
+
     // Shared room setup - this page also accepts the room ID from editing forms
     $requestId = $_POST['room'] ?? $_GET['room'] ?? '0';
     $roomId = normalizeRoomId($requestId);

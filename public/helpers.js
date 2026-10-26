@@ -104,9 +104,13 @@ export function galleryDoorState({ lightsOn, period }) {
 }
 // Preserve the appearance from before the blue-night and dark-gallery experiments.
 export function destinationDoorState({ viewerHallway, gallery, skylight, lightsOn, period, distinctGalleryDoors }) {
+    // Inside galleries, keep the default door regardless of neighboring lighting.
+    if (!viewerHallway) return 'dark';
+
+    // Hallway views still reflect the destination gallery's lighting and skylight.
     if (skylight) return galleryDoorState({ lightsOn, period });
-    if (viewerHallway && lightsOn) return gallery ? 'bright' : 'medium';
-    return !viewerHallway && gallery && distinctGalleryDoors ? 'bright' : 'dark';
+    if (lightsOn) return gallery ? 'bright' : 'medium';
+    return 'dark';
 }
 export const doorStateFile = state => DOOR_TEXTURES[state] ?? DOOR_TEXTURES.dark;
 export function doorScenarioKey(context) {
@@ -993,11 +997,9 @@ export class Room {
         plaque.position.set(0, -sign.geometry.parameters.height / 2 - height / 2 - 0.075,
             sign.geometry.parameters.depth / 2 + 0.002);
         plaque.userData.galleryEntry = { id, url: url.href };
-        // The enter graphic and its plaque open the same destination information.
-        if (this.hallway) {
-            sign.userData.galleryEntry = plaque.userData.galleryEntry;
-            this.app.clickable.push(sign);
-        }
+        // Clicking the entrance graphic uses the actual door's entry behavior.
+        sign.userData.entryDoor = spec.mesh;
+        this.app.clickable.push(sign);
         sign.add(plaque);
         this.app.clickable.push(plaque);
     }
@@ -1364,6 +1366,11 @@ export class Room {
     }
 
     async _hit(object) {
+        // Forward entrance-sign clicks to the door so all travel rules stay shared.
+        if (object.userData.entryDoor) {
+            await this._hit(object.userData.entryDoor);
+            return;
+        }
         if (object.userData.isDoor && this.wallEditor?.open) return;
         if (this._doorTravelPending) return;
         const data = object.userData;

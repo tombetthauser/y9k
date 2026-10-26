@@ -220,7 +220,44 @@ function roomLetters(string $map, array $spots, array $images): array
 
 function randomRoom(): string
 {
-    return encodeBase36(gmp_init(random_int(0, 36 ** 6 - 1)));
+    // All random-room entry points share the same pronounceable ID generator.
+    return pronounceableId();
+}
+
+function pronounceableId(int $minGroups = 2, int $maxGroups = 6): string
+{
+    // Each group contributes one or two letters to the finished ID.
+    $consonants = [
+        'b', 'c', 'd', 'f', 'g', 'h', 'j', 'k', 'l',
+        'm', 'n', 'p', 'r', 's', 't', 'v', 'w', 'z',
+        'ch', 'sh', 'th', 'ph', 'wh',
+    ];
+    $vowels = [
+        'a', 'e', 'i', 'o', 'u',
+        'ae', 'ai', 'ao', 'au', 'ea', 'ee', 'ei',
+        'ie', 'io', 'oa', 'oi', 'oo', 'ou',
+    ];
+
+    if ($minGroups < 2 || $maxGroups > 6 || $minGroups > $maxGroups) {
+        throw new InvalidArgumentException(
+            'Choose a group range between 2 and 6.'
+        );
+    }
+
+    // Choose the length and give either starting group an equal chance.
+    $groupCount = random_int($minGroups, $maxGroups);
+    $useConsonant = random_int(0, 1) === 1;
+    $id = '';
+
+    for ($i = 0; $i < $groupCount; $i++) {
+        $groups = $useConsonant ? $consonants : $vowels;
+        $id .= $groups[random_int(0, count($groups) - 1)];
+
+        // Alternate consonants and vowels for the next group.
+        $useConsonant = !$useConsonant;
+    }
+
+    return $id;
 }
 
 function lengthPhrase(int|string|GMP $feet): string
