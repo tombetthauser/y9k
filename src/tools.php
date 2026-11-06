@@ -444,6 +444,142 @@ function restoreImageBytes(string $stored, string $roomId): string
     return roomXor(substr($stored, strlen($header)), $roomId);
 }
 
+// LLM ROOM IMAGE MOVE: BEGIN atomically reassign and re-key a room's image files.
+function moveRoomImagesToGallery(PDO $pdo, string $sourceRoomId, string $targetRoomId): int
+{
+    $sourceRoomId = normalizeRoomId($sourceRoomId);
+    $targetRoomId = normalizeRoomId($targetRoomId);
+    $sourceHash = hashRoomId($sourceRoomId);
+    $targetHash = hashRoomId($targetRoomId);
+    $stagedFiles = [];
+    $installedFiles = [];
+
+    $stageFile = static function (string $path, string $bytes) use (&$stagedFiles): void {
+        $temporary = $path . '.move-' . bin2hex(random_bytes(8));
+        if (@file_put_contents($temporary, $bytes, LOCK_EX) !== strlen($bytes)) {
+            @unlink($temporary);
+            throw new RuntimeException('Could not stage an image file for the room move.');
+        }
+        $stagedFiles[] = [
+            'path' => $path,
+            'temporary' => $temporary,
+            'backup' => $path . '.backup-' . bin2hex(random_bytes(8)),
+        ];
+    };
+
+    $pdo->exec('BEGIN IMMEDIATE');
+    try {
+        if (roomDoorCount(getRoomDoors($targetRoomId, $pdo)) >= 2) {
+            throw new RuntimeException('The target room is not a gallery. Images can only be moved to a room with zero or one door.');
+        }
+
+        $things = $pdo->prepare(
+            'SELECT id, filename, filekey, wall, x, y, width, thumbnail
+             FROM things WHERE room = :room ORDER BY id'
+        );
+        $things->execute(['room' => $sourceHash]);
+        $images = $things->fetchAll(PDO::FETCH_ASSOC);
+        $sourceIsGallery = roomDoorCount(getRoomDoors($sourceRoomId, $pdo)) < 2;
+
+        foreach ($images as $image) {
+            $metadata = restoreImageMetadata($image, $sourceRoomId);
+            $originalPath = imageStoragePath($image['filekey']);
+            $storedOriginal = @file_get_contents($originalPath);
+            if ($storedOriginal === false) {
+                throw new RuntimeException('Could not read an original image during the room move.');
+            }
+            $stageFile(
+                $originalPath,
+                scrambleImageBytes(restoreImageBytes($storedOriginal, $sourceRoomId), $targetRoomId)
+            );
+
+            $thumbnailPath = thumbnailStoragePath($image['filekey']);
+            if (is_file($thumbnailPath)) {
+                $storedThumbnail = @file_get_contents($thumbnailPath);
+                if ($storedThumbnail === false) {
+                    throw new RuntimeException('Could not read a thumbnail during the room move.');
+                }
+                $stageFile(
+                    $thumbnailPath,
+                    scrambleImageBytes(restoreImageBytes($storedThumbnail, $sourceRoomId), $targetRoomId)
+                );
+            } elseif ($image['thumbnail'] === 'created') {
+                throw new RuntimeException('A generated thumbnail is missing; the room move was stopped safely.');
+            }
+
+            $placement = $sourceIsGallery
+                ? ['wall' => $metadata['wall'], 'x' => $metadata['x'], 'y' => $metadata['y'], 'width' => $metadata['width']]
+                : ['wall' => null, 'x' => null, 'y' => null, 'width' => null];
+            $update = $pdo->prepare(
+                'UPDATE things SET room = :room, filename = :filename, wall = :wall, x = :x, y = :y, width = :width
+                 WHERE id = :id AND room = :source'
+            );
+            $update->execute([
+                'room' => $targetHash,
+                'filename' => scrambleMetadata($metadata['filename'], $targetRoomId),
+                'wall' => scrambleMetadata($placement['wall'], $targetRoomId),
+                'x' => scrambleMetadata($placement['x'], $targetRoomId),
+                'y' => scrambleMetadata($placement['y'], $targetRoomId),
+                'width' => scrambleMetadata($placement['width'], $targetRoomId),
+                'id' => $image['id'],
+                'source' => $sourceHash,
+            ]);
+            if ($update->rowCount() !== 1) {
+                throw new RuntimeException('An image changed while the room move was in progress.');
+            }
+        }
+
+        foreach ($stagedFiles as $staged) {
+            if (!@rename($staged['path'], $staged['backup'])) {
+                throw new RuntimeException('Could not safely replace an image file for the room move.');
+            }
+            $installedFiles[] = $staged;
+            if (!@rename($staged['temporary'], $staged['path'])) {
+                throw new RuntimeException('Could not safely install a re-keyed image file.');
+            }
+        }
+
+        $pdo->prepare('UPDATE thumbnail_jobs SET room_id = :target WHERE thing_id IN (
+            SELECT id FROM things WHERE room = :target_hash
+        )')->execute(['target' => $targetRoomId, 'target_hash' => $targetHash]);
+        $pdo->exec('COMMIT');
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->exec('ROLLBACK');
+        }
+
+        $recoveryFailures = [];
+        foreach (array_reverse($installedFiles) as $installed) {
+            if ((file_exists($installed['path']) || is_link($installed['path'])) && !@unlink($installed['path'])) {
+                $recoveryFailures[] = basename($installed['path']);
+                continue;
+            }
+            if (file_exists($installed['backup']) && !@rename($installed['backup'], $installed['path'])) {
+                $recoveryFailures[] = basename($installed['path']);
+            }
+        }
+        foreach ($stagedFiles as $staged) {
+            if (file_exists($staged['temporary']) && !@unlink($staged['temporary'])) {
+                $recoveryFailures[] = basename($staged['temporary']);
+            }
+        }
+        if ($recoveryFailures !== []) {
+            error_log('Room image move recovery failed for files: ' . implode(', ', $recoveryFailures));
+            throw new RuntimeException('The room move failed and file recovery needs attention. Check the server error log.', 0, $error);
+        }
+        throw $error;
+    }
+
+    foreach ($installedFiles as $installed) {
+        if (file_exists($installed['backup']) && !@unlink($installed['backup'])) {
+            error_log('Could not remove room image move backup: ' . basename($installed['backup']));
+        }
+    }
+
+    return count($images);
+}
+// LLM ROOM IMAGE MOVE: END atomically reassign and re-key a room's image files.
+
 function imageUrl(string $roomId, string $filekey): string 
 {
     return '/image.php?r=' . rawurlencode(normalizeRoomId($roomId)) . '&k=' . rawurlencode($filekey);

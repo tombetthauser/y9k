@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 const { addSkyLighting } = helpers;
 const { SKY_DEFAULTS } = helpers;
-const { defaultComputerSkySettings, computerRoomSettings } = helpers;
+const { defaultComputerSkySettings, computerRoomSettings, roomWindTrack } = helpers;
 
 class Color {
     constructor(hex = 0xffffff) { this.setHex(hex); }
@@ -32,13 +32,19 @@ function fixture() {
         traverse(callback) { objects.forEach(callback); } };
     const roomLights = { isOn: () => on, onChange(callback) { listeners.add(callback); callback(on); return () => listeners.delete(callback); },
         setOn(value) { on = value; for (const callback of listeners) callback(on); } };
-    const room = { options: { gallerySkylight: true, skylightEdgeColor: 0x666666, skylightOffEdgeColor: 0x555555 },
+    const musicPaths = [];
+    const room = { options: {
+        gallerySkylight: true, music: '/muffled-wind.mp3', skylightWind: '/birds-wind.mp3',
+        windVolume: 0.25, skylightWindVolume: 0.12,
+        skylightEdgeColor: 0x666666, skylightOffEdgeColor: 0x555555,
+    },
         app: { scene, roomLights, textureLoader: { async loadAsync(path) { return { path, dispose() {} }; } },
+            music: { setMusicPath(path, volume) { musicPaths.push([path, volume]); } },
             THREE: { Color, Group: class { children = []; }, CylinderGeometry: class { dispose() {} },
                 MeshBasicMaterial: class { color = new Color(); dispose() {} } } },
         materials: { wall, floor, ceiling }, layout: { ceiling: { material: [ceiling, makeMaterial()] }, skylightLip: { children: [trim] } },
         skylightTreeMaterial: makeMaterial(), stage: { querySelectorAll() { return []; } } };
-    return { room, roomLights, ambient, directional, wall, face, trim };
+    return { room, roomLights, ambient, directional, wall, face, trim, musicPaths };
 }
 
 test('enclosed rooms and hallways do not acquire sky lighting or controls', async () => {
@@ -47,13 +53,16 @@ test('enclosed rooms and hallways do not acquire sky lighting or controls', asyn
 });
 
 test('manual periods and actual on/off flicker apply the approved profiles together', async () => {
-    const { room, roomLights, ambient, directional, wall, trim } = fixture();
+    const { room, roomLights, ambient, directional, wall, trim, musicPaths } = fixture();
     const skies = [];
     const controller = await addSkyLighting(room, { computer: { setSky: sky => skies.push(sky) } });
     try {
         for (const [period, sky] of [['day', 'day'], ['dawn', 'sunset'], ['evening', 'sunset'], ['night', 'stars']]) {
             controller.setSelection(period);
             assert.equal(controller.getState().sky, sky);
+            assert.deepEqual(musicPaths.at(-1), period === 'night'
+                ? ['/muffled-wind.mp3', 0.25]
+                : ['/birds-wind.mp3', 0.12]);
             for (const on of [false, true, false, true]) {
                 roomLights.setOn(on);
                 const profile = SKY_DEFAULTS.skies[sky].states[on ? 'on' : 'off'].lighting;
@@ -68,6 +77,19 @@ test('manual periods and actual on/off flicker apply the approved profiles toget
     } finally { controller.dispose(); }
     assert.equal(room.skyLighting, null);
     assert.equal(Array.isArray(trim.material), false);
+});
+
+test('muffled wind is disabled outside skylight galleries', () => {
+    for (const period of ['day', 'dawn', 'evening', 'night']) {
+        assert.equal(roomWindTrack({
+            hallway: true, skylight: true, period,
+            muffledWind: '/muffled-wind.mp3', birdsWind: '/birds-wind.mp3',
+        }), null);
+        assert.equal(roomWindTrack({
+            hallway: false, skylight: false, period,
+            muffledWind: '/muffled-wind.mp3', birdsWind: '/birds-wind.mp3',
+        }), null);
+    }
 });
 
 test('computer production presets preserve every approved lighting and screen-light value', () => {

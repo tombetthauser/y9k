@@ -240,10 +240,18 @@ test('default cache keeps more than three small original images', async () => {
     }
 });
 
-test('bfcache restoration replaces revoked lightbox blobs, requeues images, and ignores stale fetches', async () => {
+test('original-image preloads wait for idle time, open immediately on click, and restart after bfcache', async () => {
     const originalWindow = globalThis.window, originalFetch = globalThis.fetch;
     const originalCreate = URL.createObjectURL, originalRevoke = URL.revokeObjectURL;
     const events = new EventTarget(), pending = [], revoked = [];
+    const idleCallbacks = new Map();
+    let nextIdleCallbackId = 0;
+    events.requestIdleCallback = callback => {
+        const id = ++nextIdleCallbackId;
+        idleCallbacks.set(id, callback);
+        return id;
+    };
+    events.cancelIdleCallback = id => idleCallbacks.delete(id);
     globalThis.window = events;
     globalThis.fetch = url => new Promise(resolve => pending.push({ url, resolve }));
     let blobCount = 0;
@@ -267,27 +275,49 @@ test('bfcache restoration replaces revoked lightbox blobs, requeues images, and 
         Object.defineProperty(event, 'persisted', { value: persisted });
         events.dispatchEvent(event);
     };
+    const runIdleCallback = async () => {
+        const [id, callback] = idleCallbacks.entries().next().value;
+        idleCallbacks.delete(id);
+        callback();
+        await tick();
+    };
+    const flushPromises = async () => {
+        for (let i = 0; i < 4; i++)
+            await tick();
+    };
     try {
         room._startOriginalImagePrefetch();
-        assert.deepEqual(pending.map(item => item.url), ['/original', '/second']);
+        assert.deepEqual(pending, []);
+        assert.equal(idleCallbacks.size, 1);
+        room._openArtwork(art2);
+        assert.equal(shown, '/second');
+        assert.equal(caption, '/second');
+
+        await runIdleCallback();
+        assert.deepEqual(pending.map(item => item.url), ['/original']);
         pending[0].resolve(response(2));
-        await tick();
+        await flushPromises();
         room._openArtwork(art);
         assert.equal(shown, 'blob:room-1');
-        assert.equal(caption, '/original');
+        assert.equal(idleCallbacks.size, 0);
 
         dispatch('pagehide', true);
         assert.equal(shown, '/original');
         assert.deepEqual(revoked, ['blob:room-1']);
+        assert.equal(idleCallbacks.size, 0);
         dispatch('pageshow', true);
-        assert.deepEqual(pending.map(item => item.url), ['/original', '/second', '/original', '/second']);
+        assert.equal(idleCallbacks.size, 1);
+        await runIdleCallback();
+        assert.deepEqual(pending.map(item => item.url), ['/original', '/original']);
         pending[1].resolve(response(2));
-        await tick();
-        assert.equal(shown, '/original');
-        assert.equal(blobCount, 1);
+        await flushPromises();
+        assert.equal(shown, 'blob:room-2');
+
+        assert.equal(idleCallbacks.size, 1);
+        await runIdleCallback();
+        assert.deepEqual(pending.map(item => item.url), ['/original', '/original', '/second']);
         pending[2].resolve(response(2));
-        pending[3].resolve(response(2));
-        await tick();
+        await flushPromises();
         assert.equal(shown, 'blob:room-2');
         assert.equal(caption, '/original');
         assert.equal(room._lightboxPinnedId, '1');

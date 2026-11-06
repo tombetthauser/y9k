@@ -26,6 +26,21 @@ function php(project, code) {
     return execFileSync('php', ['-r', code], { cwd: project, encoding: 'utf8' });
 }
 
+// LLM ROOM IMAGE MOVE TEST SUPPORT: BEGIN.
+function setRoomDoors(project, roomId, openDirections) {
+    const directions = JSON.stringify(openDirections);
+    php(project, `require 'src/database.php'; require 'src/tools.php';
+        $pdo = database();
+        $room = '${roomId}';
+        foreach (['north', 'east', 'south', 'west'] as $direction) {
+            setHole($pdo, $room, getNeighborId($room, $direction), false);
+        }
+        foreach (json_decode('${directions}', true, 512, JSON_THROW_ON_ERROR) as $direction) {
+            setHole($pdo, $room, getNeighborId($room, $direction), true);
+        }`);
+}
+// LLM ROOM IMAGE MOVE TEST SUPPORT: END.
+
 test('uploads queue a thumbnail without blocking and preserve the original', async () => {
     const project = mkdtempSync(join(tmpdir(), 'y9k-thumbnail-test-'));
     let server;
@@ -100,22 +115,72 @@ test('uploads queue a thumbnail without blocking and preserve the original', asy
         assert.equal(php(project,
             "require 'src/database.php'; echo database()->query('SELECT COUNT(*) FROM thumbnail_jobs')->fetchColumn();"), '0');
 
+        // LLM ROOM IMAGE MOVE INTEGRATION: BEGIN.
+        setRoomDoors(project, 'erin', ['north', 'east']);
+        const checkMoveForm = new FormData();
+        for (const [key, value] of Object.entries({
+            room: 'tom', action: 'check-gallery', target_room: 'erin',
+        })) checkMoveForm.set(key, value);
+        const hallwayCheckResponse = await fetch(`${base}/index.php?room=tom`, {
+            method: 'POST', headers: { Accept: 'application/json' }, body: checkMoveForm,
+        });
+        const hallwayCheck = await hallwayCheckResponse.json();
+        assert.equal(hallwayCheckResponse.status, 200, JSON.stringify(hallwayCheck));
+        assert.equal(hallwayCheck.gallery, false);
+
+        const blockedMoveForm = new FormData();
+        for (const [key, value] of Object.entries({
+            room: 'tom', action: 'move-room-images', target_room: 'erin',
+        })) blockedMoveForm.set(key, value);
+        const blockedMove = await fetch(`${base}/index.php?room=tom`, {
+            method: 'POST', headers: { Accept: 'application/json' }, body: blockedMoveForm,
+        });
+        const blockedResult = await blockedMove.json();
+        assert.equal(blockedMove.status, 400, JSON.stringify(blockedResult));
+        assert.match(blockedResult.error, /not a gallery/i);
+        assert.deepEqual(Buffer.from(await (await fetch(base + result.url)).arrayBuffer()), original);
+
+        setRoomDoors(project, 'erin', []);
+        const checkedMove = await fetch(`${base}/index.php?room=tom`, {
+            method: 'POST', headers: { Accept: 'application/json' }, body: checkMoveForm,
+        });
+        const galleryCheck = await checkedMove.json();
+        assert.equal(checkedMove.status, 200, JSON.stringify(galleryCheck));
+        assert.equal(galleryCheck.gallery, true);
+
+        const moveForm = new FormData();
+        for (const [key, value] of Object.entries({
+            room: 'tom', action: 'move-room-images', target_room: 'erin',
+        })) moveForm.set(key, value);
+        const moved = await fetch(`${base}/index.php?room=tom`, {
+            method: 'POST', headers: { Accept: 'application/json' }, body: moveForm,
+        });
+        const moveResult = await moved.json();
+        assert.equal(moved.status, 200, JSON.stringify(moveResult));
+        assert.equal(moveResult.moved, 1);
+        const movedOriginalUrl = result.url.replace('r=tom', 'r=erin');
+        const movedThumbnailUrl = result.thumbnailUrl.replace('r=tom', 'r=erin');
+        assert.deepEqual(Buffer.from(await (await fetch(base + movedOriginalUrl)).arrayBuffer()), original);
+        assert.deepEqual(Buffer.from(await (await fetch(base + movedThumbnailUrl)).arrayBuffer()), thumbBytes);
+        assert.equal((await fetch(base + result.url)).status, 404);
+
         const [thumbnailKey] = readdirSync(join(project, 'data/thumbnails'));
         const thumbnailPath = join(project, 'data/thumbnails', thumbnailKey);
         const savedThumbnail = readFileSync(thumbnailPath);
         unlinkSync(thumbnailPath);
-        assert.equal((await fetch(base + result.thumbnailUrl)).status, 500);
+        assert.equal((await fetch(base + movedThumbnailUrl)).status, 500);
         writeFileSync(thumbnailPath, savedThumbnail);
 
         const deleteForm = new FormData();
-        for (const [key, value] of Object.entries({ room: 'tom', action: 'delete', id: String(result.id) })) {
+        for (const [key, value] of Object.entries({ room: 'erin', action: 'delete', id: String(result.id) })) {
             deleteForm.set(key, value);
         }
-        const deleted = await fetch(`${base}/index.php?room=tom`, {
+        const deleted = await fetch(`${base}/index.php?room=erin`, {
             method: 'POST', headers: { Accept: 'application/json' }, body: deleteForm,
         });
         assert.equal((await deleted.json()).ok, true);
-        assert.equal((await fetch(base + result.url)).status, 404);
+        assert.equal((await fetch(base + movedOriginalUrl)).status, 404);
+        // LLM ROOM IMAGE MOVE INTEGRATION: END.
         assert.deepEqual(readdirSync(join(project, 'data/images')), []);
         assert.deepEqual(readdirSync(join(project, 'data/thumbnails')), []);
 

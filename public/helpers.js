@@ -37,6 +37,13 @@ export const roomAsset = (path) => {
     return new URL("./index.php?asset=" + encodeURIComponent(path), import.meta.url).href;
 };
 
+// LLM AUDIO: Hallways/enclosed galleries have no wind; skylight wind follows the local sky period.
+export const roomWindTrack = ({ hallway, skylight, period, muffledWind, birdsWind }) => {
+    if (hallway || !skylight)
+        return null;
+    return period === "night" ? muffledWind : birdsWind;
+};
+
 // Store only lit rooms; missing entries mean off. Storage failures leave the room usable.
 export const roomLightState = {
     isOn(id) {
@@ -275,8 +282,10 @@ export const createRoom = (data = {}, options = {}) => {
             label: door.label ?? door.neighborId.toUpperCase(),
         }];
     }));
-    const config = { roomId: data.id ?? "demo", neighbors: data.neighbors ?? [], exitWall: data.exitWall, roomInfo: data.roomInfo, exitNotice: data.exitNotice, doors, ...options };
-    const gallery = data.gallery ?? Object.values(config.doors).filter(door => door && door.exists !== false).length < 2;
+    const config = { roomId: data.id ?? "demo", neighbors: data.neighbors ?? [], exitWall: data.exitWall, roomInfo: data.roomInfo, exitNotice: data.exitNotice, textInterfaceUrl: data.textInterfaceUrl, doors, ...options };
+    // LLM GALLERY RULE: Use the actual door list so stale page data cannot misclassify a room.
+    const doorCount = Object.values(config.doors).filter(door => door && door.exists !== false).length;
+    const gallery = doorCount < 2;
     const room = gallery ? new Gallery(config) : new Hallway(config);
     room.addImages(data.images ?? [], { stored: true });
     return room;
@@ -333,6 +342,15 @@ export const createRoomStorage = (id, { endpoint = "index.php", onChange = () =>
         async delete(p) {
             await request("delete", { id: p.id });
             onChange({ action: "delete", image: { id: p.id } });
+        },
+
+        // LLM ROOM IMAGE MOVE: Use the existing room endpoint for one atomic gallery move.
+        async checkGallery(targetRoomId) {
+            return request("check-gallery", { target_room: targetRoomId });
+        },
+
+        async moveRoomImages(targetRoomId) {
+            return request("move-room-images", { target_room: targetRoomId });
         },
     };
 };
@@ -723,6 +741,12 @@ export class Room {
         this.ready = Promise.resolve(this);
         this._originalPrefetcher = null;
         this._originalPrefetchStarted = false;
+        // LLM THUMBNAILS: BEGIN defer original preloads until the browser is idle.
+        this._originalPrefetchQueue = new Map();
+        this._originalPrefetchTask = null;
+        this._originalPrefetchActive = false;
+        this._originalPrefetchPaused = false;
+        // LLM THUMBNAILS: END defer original preloads until the browser is idle.
         this._lightboxOriginalId = null;
         this._lightboxPinnedId = null;
         for (const [wall, value] of Object.entries(options.doors || {})) {
@@ -737,7 +761,6 @@ export class Room {
         if (this.app)
             throw new Error("Set doors before mount(); hallway outlines depend on them.");
         const name = roomWall(wall);
-        // Galleries can use every wall when the gallery-percentage experiment selects them.
         // roomWall() keeps doors limited to the four cardinal walls.
         this.doors[name] = { locked: false, ...options };
         return this;
@@ -817,10 +840,18 @@ export class Room {
             this.stage.appendChild(this._doorFade);
         }
         const height = feetToWorld(o.height);
+        const initialWindPeriod = getCaliforniaSkyPeriod().period;
+        const initialWindPath = roomWindTrack({
+            hallway: this.hallway,
+            skylight: o.gallerySkylight,
+            period: initialWindPeriod,
+            muffledWind: o.music,
+            birdsWind: o.skylightWind,
+        });
         this.app = createRoomApp({
-            // Wind uses one track at a time, with birds only beneath a skylight.
-            musicPath: !this.hallway && o.gallerySkylight ? o.skylightWind : o.music,
-            musicVolume: !this.hallway && o.gallerySkylight ? o.skylightWindVolume : (o.windVolume ?? o.musicVolume),
+            // LLM AUDIO: Do not play ambient wind in hallways or enclosed galleries.
+            musicPath: initialWindPath,
+            musicVolume: initialWindPath === o.music ? (o.windVolume ?? o.musicVolume) : o.skylightWindVolume,
             backgroundMusicVolume: o.backgroundMusicVolume, lightSwitchVolume: o.lightSwitchVolume,
             doorLockedVolume: o.doorLockedVolume, doorUnlockedVolume: o.doorUnlockedVolume, musicEntryChance: arrival.sameRoom ? 0 : 0.2,
             lightBuzzPath: o.lightBuzz, lightBuzzVolume: o.lightBuzzVolume,
@@ -919,7 +950,11 @@ export class Room {
         });
         if (!this.hallway && o.gallerySkylight) this._addSkylightOutside();
         this.materials = materials;
-        this._factories = this.app.createPropFactories({ ...this.layout, doorHeight: inchesToWorld(o.doorHeight) });
+        this._factories = this.app.createPropFactories({
+            ...this.layout,
+            doorHeight: inchesToWorld(o.doorHeight),
+            textInterfaceUrl: o.textInterfaceUrl,
+        });
         this._factories.addLightFixture = createAddLightFixture({ scene, textureLoader, ...this.layout, roomLights,
             reactiveFace: !this.hallway && o.gallerySkylight });
         for (const [wall, door] of Object.entries(this.doors))
@@ -1367,11 +1402,60 @@ export class Room {
             panel.setAttribute("aria-label", "gallery entry details");
             panel.innerHTML = `<div class="wall-editor-header">
                 <span data-entry></span><button type="button" name="close" aria-label="close gallery details">x</button>
-                </div><p data-info hidden style="white-space:pre-line"></p><p><a data-url></a></p>
+                </div><p data-info hidden style="white-space:pre-line"></p>
+                <details data-room-move hidden>
+                    <summary>Move all images to another gallery</summary>
+                    <label>Target room ID: <input type="text" data-target-room autocomplete="off" spellcheck="false"></label>
+                    <button type="button" data-move-room-images>Move images</button>
+                    <p data-move-status role="status" aria-live="polite"></p>
+                </details>
+                <p><a data-url></a></p>
                 <button type="button" data-copy>copy room link</button><p role="status" aria-live="polite"></p>`;
             this.stage.appendChild(panel);
             this._addAudioToggle(panel);
             panel.querySelector('[name="close"]').onclick = () => panel.close();
+            // LLM ROOM IMAGE MOVE: Confirm in the browser, then let PHP validate and move atomically.
+            const moveTool = panel.querySelector('[data-room-move]');
+            const moveButton = panel.querySelector('[data-move-room-images]');
+            const targetInput = panel.querySelector('[data-target-room]');
+            const moveStatus = panel.querySelector('[data-move-status]');
+            moveButton.onclick = async () => {
+                const targetRoomId = targetInput.value.trim();
+                if (!/^[0-9a-z]+$/i.test(targetRoomId)) {
+                    moveStatus.textContent = "Enter a room ID using letters and numbers.";
+                    return;
+                }
+                if (targetRoomId.toLowerCase() === String(this.options.roomId).toLowerCase()) {
+                    moveStatus.textContent = "Choose a different target room.";
+                    return;
+                }
+                moveButton.disabled = true;
+                moveStatus.textContent = "Checking the target room…";
+                try {
+                    const persistence = this.options.persistence;
+                    if (typeof persistence?.checkGallery !== "function"
+                        || typeof persistence?.moveRoomImages !== "function")
+                        throw new Error("Room image moving is unavailable.");
+                    const check = await persistence.checkGallery(targetRoomId);
+                    if (!check.gallery)
+                        throw new Error(`Room ${check.targetRoom.toUpperCase()} has ${check.doorCount} doors and is not a gallery. Images were not moved.`);
+                    if (!window.confirm(`WARNING: Move every image in room ${String(this.options.roomId).toUpperCase()} to room ${check.targetRoom.toUpperCase()}? Images from hallways will arrive unplaced.`)) {
+                        moveStatus.textContent = "Move cancelled.";
+                        return;
+                    }
+                    moveStatus.textContent = "Moving images…";
+                    const result = await persistence.moveRoomImages(check.targetRoom);
+                    moveStatus.textContent = `Moved ${result.moved} image(s) to gallery ${result.targetRoom.toUpperCase()}.`;
+                    window.location.reload();
+                } catch (error) {
+                    moveStatus.textContent = error.message;
+                } finally {
+                    moveButton.disabled = false;
+                }
+            };
+            for (const type of ["click", "pointerdown", "dblclick"])
+                moveTool.addEventListener(type, event => event.stopPropagation());
+            // LLM ROOM IMAGE MOVE: END.
             panel.querySelector("[data-copy]").onclick = async () => {
                 const link = panel.querySelector("[data-url]"), status = panel.querySelector("[role=status]");
                 const selectLink = () => {
@@ -1406,6 +1490,8 @@ export class Room {
         }
         const details = this.entryDialog.querySelector("[data-info]");
         details.hidden = !info;
+        const moveTool = this.entryDialog.querySelector("[data-room-move]");
+        moveTool.hidden = !info;
         // Build text nodes so labels can be styled without treating room data as HTML.
         details.replaceChildren();
         for (const [index, line] of (info ?? "").split("\n").entries()) {
@@ -1577,6 +1663,11 @@ export class Room {
             return;
         }
         if (data.galleryEntry) { this._openGalleryEntry(data.galleryEntry); return; }
+        // LLM NAVIGATION: Electrical boxes open the matching room in the text interface.
+        if (data.isElectricalBox && data.href) {
+            window.location.assign(data.href);
+            return;
+        }
         await this._closeModals();
         if (data.roomImageId != null && !this.images.has(String(data.roomImageId))) return;
         if (data.isLightSwitch) {
@@ -1629,6 +1720,11 @@ export class Room {
         this._originalPrefetchStarted = true;
         if (!this._originalPrefetchLifecycle && typeof window !== "undefined") {
             const hide = () => {
+                // LLM THUMBNAILS: BEGIN pause preloading while this page is hidden.
+                this._originalPrefetchPaused = true;
+                this._cancelOriginalPrefetchTask();
+                this._originalPrefetchQueue.clear();
+                // LLM THUMBNAILS: END pause preloading while this page is hidden.
                 const art = this.images.get(this._lightboxOriginalId);
                 if (art?.userData.imageFile)
                     this.app?.lightbox?.setImageSource?.(art.userData.imageFile, art);
@@ -1638,36 +1734,88 @@ export class Room {
                 prefetcher?.dispose();
             };
             const show = event => {
-                if (event.persisted)
+                if (event.persisted) {
+                    this._originalPrefetchPaused = false;
                     this._startOriginalImagePrefetch();
+                }
             };
             window.addEventListener("pagehide", hide);
             window.addEventListener("pageshow", show);
             this._originalPrefetchLifecycle = { hide, show };
         }
-        this._originalPrefetcher ??= createImageOriginalPrefetcher({ eventTarget: null });
+        this._originalPrefetchPaused = false;
+        this._originalPrefetcher ??= createImageOriginalPrefetcher({
+            concurrency: 1,
+            eventTarget: null,
+        });
         for (const [id, art] of this.images)
             this._prefetchOriginalImage(id, art);
     }
 
     _prefetchOriginalImage(id, art) {
         const original = art?.userData.imageFile;
-        const prefetcher = this._originalPrefetcher;
-        if (!prefetcher || !art?.userData.imageThumbnailUrl
+        if (!this._originalPrefetcher || !art?.userData.imageThumbnailUrl
             || art.userData.imageThumbnailUrl === original || !original)
             return;
-        prefetcher.enqueue(id, original).then(blobUrl => {
-            if (!blobUrl || this._originalPrefetcher !== prefetcher
-                || this.images.get(String(id)) !== art || art.userData.imageFile !== original
-                || prefetcher.get(id) !== blobUrl) return;
-            if (this._lightboxOriginalId === String(id)) {
-                if (this._lightboxPinnedId !== String(id)
-                    && prefetcher.pin(id))
-                    this._lightboxPinnedId = String(id);
-                this.app?.lightbox?.setImageSource?.(blobUrl, art);
-            }
-        });
+        this._originalPrefetchQueue.set(String(id), { art, original });
+        this._scheduleOriginalPrefetchTask();
     }
+
+    // LLM THUMBNAILS: BEGIN schedule low-priority original-image preloads.
+    _cancelOriginalPrefetchTask() {
+        const task = this._originalPrefetchTask;
+        if (task === null)
+            return;
+
+        if (task.kind === "idle" && typeof window !== "undefined"
+            && typeof window.cancelIdleCallback === "function")
+            window.cancelIdleCallback(task.id);
+        else
+            clearTimeout(task.id);
+
+        this._originalPrefetchTask = null;
+    }
+
+    _scheduleOriginalPrefetchTask() {
+        if (this._originalPrefetchPaused || this._originalPrefetchActive
+            || this._originalPrefetchTask !== null || this._originalPrefetchQueue.size === 0)
+            return;
+
+        const run = () => {
+            this._originalPrefetchTask = null;
+            if (this._originalPrefetchPaused || this._originalPrefetchQueue.size === 0)
+                return;
+
+            const [id, item] = this._originalPrefetchQueue.entries().next().value;
+            this._originalPrefetchQueue.delete(id);
+            const prefetcher = this._originalPrefetcher;
+            this._originalPrefetchActive = true;
+            prefetcher.enqueue(id, item.original).then(blobUrl => {
+                if (!blobUrl || this._originalPrefetcher !== prefetcher
+                    || this.images.get(id) !== item.art
+                    || item.art.userData.imageFile !== item.original
+                    || prefetcher.get(id) !== blobUrl)
+                    return;
+                if (this._lightboxOriginalId === id) {
+                    if (this._lightboxPinnedId !== id && prefetcher.pin(id))
+                        this._lightboxPinnedId = id;
+                    this.app?.lightbox?.setImageSource?.(blobUrl, item.art);
+                }
+            }).finally(() => {
+                this._originalPrefetchActive = false;
+                this._scheduleOriginalPrefetchTask();
+            });
+        };
+
+        if (typeof window !== "undefined" && typeof window.requestIdleCallback === "function") {
+            const id = window.requestIdleCallback(run, { timeout: 5000 });
+            this._originalPrefetchTask = { kind: "idle", id };
+        } else {
+            // Older browsers get the same deferral, without blocking first paint.
+            this._originalPrefetchTask = { kind: "timeout", id: setTimeout(run, 2000) };
+        }
+    }
+    // LLM THUMBNAILS: END schedule low-priority original-image preloads.
 
     _openArtwork(art) {
         const id = String(art.userData.roomImageId);
@@ -1679,6 +1827,14 @@ export class Room {
         const cached = this._originalPrefetcher?.pin(id);
         if (cached)
             this._lightboxPinnedId = id;
+        else {
+            // LLM THUMBNAILS: BEGIN let the clicked image load directly, not twice.
+            this._originalPrefetchQueue.delete(id);
+            if (this._originalPrefetchQueue.size === 0)
+                this._cancelOriginalPrefetchTask();
+            this._originalPrefetcher?.remove(id);
+            // LLM THUMBNAILS: END let the clicked image load directly, not twice.
+        }
         this.app.lightbox?.open(cached || original, this.app.music.isSoundOn(), art.userData.imageName, {
             source: art,
             captionUrl: original,
@@ -1839,6 +1995,11 @@ export class Room {
         if (persist && this.options.persistence?.delete)
             await this.options.persistence.delete(this.imagePlacement(id), art);
         this.app.lightbox?.close();
+        // LLM THUMBNAILS: BEGIN remove deleted artwork from the idle preload queue.
+        this._originalPrefetchQueue.delete(String(id));
+        if (this._originalPrefetchQueue.size === 0)
+            this._cancelOriginalPrefetchTask();
+        // LLM THUMBNAILS: END remove deleted artwork from the idle preload queue.
         this._originalPrefetcher?.remove(String(id));
         if (this._lightboxOriginalId === String(id))
             this._lightboxOriginalId = null;
@@ -2248,6 +2409,11 @@ export class Room {
                 const result = await storage.upload(this.imagePlacement(id), file);
                 // Keep the existing preview mesh, replacing only its temporary identity.
                 const art = this.images.get(id);
+                // LLM THUMBNAILS: BEGIN discard pending preload for the preview identity.
+                this._originalPrefetchQueue.delete(String(id));
+                if (this._originalPrefetchQueue.size === 0)
+                    this._cancelOriginalPrefetchTask();
+                // LLM THUMBNAILS: END discard pending preload for the preview identity.
                 this._originalPrefetcher?.remove(id);
                 this.images.delete(id);
                 id = String(result.id);
@@ -2457,7 +2623,9 @@ const addReferenceHallwayContents = (room) => {
     room.app.scene.add(group);
     const context = {
         scene: contents, textureLoader: room.app.textureLoader,
-        roomHalfY: 3.75 / 2, roomLights: room.app.roomLights
+        roomHalfY: 3.75 / 2, roomLights: room.app.roomLights,
+        clickable: room.app.clickable,
+        textInterfaceUrl: room.options.textInterfaceUrl,
     };
     const furnish = room.options.defaultFurnishings;
     const ignore = () => { };
@@ -2819,7 +2987,7 @@ export const createCheckAndActivateAudio = ({ ensureMusicAudio, afterActivate = 
         if (!readUnmuted(soundPrefKey))
             return;
         const a = ensureMusicAudio();
-        if (a.paused) {
+        if (a?.paused) {
             try {
                 await a.play();
             }
@@ -3775,7 +3943,7 @@ const BOX_DEPTH = 0.14;
 
 const CONDUIT_RADIUS = 0.032;
 
-export const createAddElectricalBox = ({ scene, textureLoader, roomHalfY }) => {
+export const createAddElectricalBox = ({ scene, textureLoader, roomHalfY, clickable = null, textInterfaceUrl = null }) => {
     return (direction, x, y, imageFile, heightFromFloor = DEFAULT_HEIGHT_FROM_FLOOR, boxWidth, boxHeight = DEFAULT_BOX_HEIGHT, boxColor = DEFAULT_BOX_COLOR) => {
         textureLoader.load(imageFile, tex => {
             tex.colorSpace = THREE.SRGBColorSpace;
@@ -3818,6 +3986,12 @@ export const createAddElectricalBox = ({ scene, textureLoader, roomHalfY }) => {
                 return;
             }
             box.position.set(bx, boxY, bz);
+            // LLM NAVIGATION: Make each visible electrical box an entry to this room's text UI.
+            if (textInterfaceUrl) {
+                box.userData.isElectricalBox = true;
+                box.userData.href = textInterfaceUrl;
+                clickable?.push(box);
+            }
             scene.add(box);
             const conduitMat = new THREE.MeshStandardMaterial({ color: boxColor });
             const topOfBox = boxY + h / 2;
@@ -5985,6 +6159,7 @@ export const createMusicControls = ({ musicPath, volume = 0.25, musicEntryChance
     let soundGeneration = 0;
     let lightsOn = initialLightsOn;
     let musicAudio = null;
+    let currentMusicPath = typeof musicPath === "string" && musicPath ? musicPath : null;
     let lightBuzzAudio = null;
     const audioUnlockers = new Set();
     let sfxContext = null;
@@ -6012,9 +6187,11 @@ export const createMusicControls = ({ musicPath, volume = 0.25, musicEntryChance
     const preloadSfx = paths => Promise.allSettled(paths.filter(Boolean).map(loadSfx));
 
     const ensureMusicAudio = () => {
+        if (!currentMusicPath)
+            return null;
         if (musicAudio)
             return musicAudio;
-        musicAudio = new Audio(musicPath);
+        musicAudio = new Audio(currentMusicPath);
         musicAudio.loop = true;
         musicAudio.volume = volume;
         return musicAudio;
@@ -6123,10 +6300,11 @@ export const createMusicControls = ({ musicPath, volume = 0.25, musicEntryChance
         const startMusic = async () => {
             if (!windOn) { musicAudio?.pause(); return; }
             const a = ensureMusicAudio();
+            if (!a) return;
             try {
                 if (a.paused)
                     await a.play();
-                if (!IS_SOUND_ON || !windOn)
+                if (!IS_SOUND_ON || !windOn || musicAudio !== a)
                     a.pause();
             }
             catch (_) { }
@@ -6165,6 +6343,21 @@ export const createMusicControls = ({ musicPath, volume = 0.25, musicEntryChance
         windListeners.forEach(listener => listener(windOn));
         if (!windOn) musicAudio?.pause();
         else await activateAudio();
+    };
+    // LLM AUDIO: Switch the ambient track without changing the visitor's wind preference.
+    const setMusicPath = async (path, nextVolume = volume) => {
+        const nextPath = typeof path === "string" && path ? path : null;
+        volume = nextVolume;
+        if (musicAudio)
+            musicAudio.volume = volume;
+        if (nextPath === currentMusicPath)
+            return;
+
+        musicAudio?.pause();
+        musicAudio = null;
+        currentMusicPath = nextPath;
+        if (IS_SOUND_ON && windOn)
+            await activateAudio();
     };
     const setBuzzOn = async on => {
         buzzOn = Boolean(on);
@@ -6257,6 +6450,7 @@ export const createMusicControls = ({ musicPath, volume = 0.25, musicEntryChance
             if (key === "buzz") { lightBuzzVolume = value; if (lightBuzzAudio) lightBuzzAudio.volume = value; }
         },
         ensureMusicAudio,
+        setMusicPath,
         isSoundOn,
         setSoundOn,
         setWindOn,
@@ -6616,11 +6810,13 @@ export const createRoomApp = ({ musicPath, musicVolume = 0.25, musicEntryChance 
         };
         loop();
     };
-    const createPropFactories = ({ roomHalfY, walls, doorHeight = 3.2 } = {}) => ({
+    const createPropFactories = ({ roomHalfY, walls, doorHeight = 3.2, textInterfaceUrl = null } = {}) => ({
         addElectricalBox: createAddElectricalBox({
             scene,
             textureLoader,
             roomHalfY,
+            clickable,
+            textInterfaceUrl,
         }),
         addExitSign: createAddExitSign({ scene, textureLoader, roomHalfY }),
         addFoldingChairs: createAddFoldingChairs({
@@ -8615,6 +8811,18 @@ export async function addSkyLighting(room, { computer = null } = {}) {
         const state = roomLights.isOn() ? 'on' : 'off';
         const p = SKY_DEFAULTS.skies[current.sky].states[state].lighting;
         computer?.setSky(current.sky);
+        // LLM AUDIO: Dawn/evening keep birds; night switches to muffled wind.
+        const windPath = roomWindTrack({
+            hallway: room.hallway,
+            skylight: room.options.gallerySkylight,
+            period: current.period,
+            muffledWind: room.options.music,
+            birdsWind: room.options.skylightWind,
+        });
+        const windVolume = current.period === 'night'
+            ? (room.options.windVolume ?? room.options.musicVolume)
+            : room.options.skylightWindVolume;
+        room.app.music.setMusicPath(windPath, windVolume);
         scene.background = textures[current.sky];
         scene.backgroundIntensity = p.sky;
         const roomTint = tint(p.hue, p.saturation, p.value);

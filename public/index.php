@@ -104,56 +104,13 @@
     $roomInfo = $roomInfo . "\n*doors do not follow spiral progression\n"
         . "*system version 1.9\n";
 
-    // From old index.php - identify the door layout and count its doors
-    $key = ($doors['north']['exists'] ? 'd' : '-')
-        . ($doors['east']['exists'] ? 'd' : '-')
-        . ($doors['south']['exists'] ? 'd' : '-')
-        . ($doors['west']['exists'] ? 'd' : '-');
+    $doorsCount = roomDoorCount($doors);
 
-    $doorsCount = substr_count($key, 'd');
-
-    // Set false to immediately restore the original gallery/hallway rules.
-    $galleryExperiment = true;
-
-    // Gallery chances in percent, grouped by the room's number of doors.
-    // Original behavior: [0 => 100, 1 => 100, 2 => 0, 3 => 0, 4 => 0].
-    // Keep 0 and 1 at 100: hallway geometry expects at least two doors.
-    $galleryChanceByDoors = [
-        0 => 100,
-        1 => 100,
-        2 => 35,
-        3 => 20,
-        4 => 10,
-    ];
-
-    // Keep this unchanged while comparing percentages.
-    // Changing it selects a different group of experimental galleries.
-    $gallerySelectionSeed = 'gallery-experiment-v1';
-
-    // Use the same selection for the current room and neighboring door previews.
-    $isGallery = static function (string $id, int $doorCount) use (
-        $galleryExperiment,
-        $galleryChanceByDoors,
-        $gallerySelectionSeed
-    ): bool {
-        if (!$galleryExperiment) {
-            return $doorCount < 2;
-        }
-
-        $chance = $galleryChanceByDoors[$doorCount];
-
-        // Handle always/never explicitly so both endpoints are exact.
-        if ($chance <= 0) return false;
-        if ($chance >= 100) return true;
-
-        // Give each room a repeatable score from 0 up to, but excluding, 100.
-        $hash = hash('sha256', $gallerySelectionSeed . ':' . normalizeRoomId($id));
-        $score = hexdec(substr($hash, 0, 8)) / 4294967296 * 100;
-
-        return $score < $chance;
-    };
-
-    $gallery = $isGallery($roomId, $doorsCount);
+    // LLM GALLERY RULE: BEGIN restore the original zero/one-door gallery rule.
+    // Keep this shared rule for the current room and the destination-door previews.
+    $isGallery = static fn(int $doorCount): bool => $doorCount < 2;
+    $gallery = $isGallery($doorsCount);
+    // LLM GALLERY RULE: END restore the original zero/one-door gallery rule.
 
     // Temporary room-to-computer assignments. Add another room ID and document URL here.
     // Placement and lighting are defined in helpers.js; database tracking can replace this map later.
@@ -181,7 +138,8 @@
     // Render sharing metadata on the server so SMS previews do not need JavaScript.
     $roomTitle = ($gallery ? 'Gallery ' : 'Room ') . strtoupper($roomId);
     $zalgoTitle = 'ḧ̴̜̙̏̈́́͋́́͆͝t̵̛̪͇̺̰͕̱̑̀̀͗̏̍t̷͔͋̕p̵̼͗͗ş̶̮̝̻̝͎̉̔̽͆͂̿͒̕ͅͅ:̴̖̟͆̒̾͑̋́̽̀͛͐/̵͕̲͇̳͗̐̽̊͌̈́͆̕͠/̴̧̪̙͑̑̽͘y̸̛̫̬̩̙̝̞̳̬̋̅̆̄̓̊̏͌͠9̸̨̥̣̥͉̜̖̗̩̺̓̀́̃͌̋͘͘͠k̸̡͔̟̜͕͇͋̂̉̓̌̃͌͂̕.̸̡̗̝̤͈̺̽̆͆̋̄͛͒̔x̸̢̛͔̦̼͍̲͇̮̤͙̔̾̌̍͑̃͗͝y̴̢̪͉͎̲͎̽͛͋̉̑̂͜z̴̼̈̈́/̸̡̥͉̅̀̽̏̈̋̇͋̚͝';
-    $previewTitle = '[' . $roomTitle . '] ' . $zalgoTitle;
+    // LLM BRAND: Use a plain sharing title while the Zalgo URL overlay is disabled.
+    $previewTitle = 'Y9K [' . $roomTitle . ']';
     $previewDescription = 'A̵̩͍̩̺͗̒̎͝ͅͅn̷̠̙̻̥̻͈͙̅͗͛̎ͅ ̵̥̭͈͓̮̼͎̄͂́͛̐̇̾͝ī̵̡̬̱͕̞̦̈́́̇͋̊͊̆̿̚n̵̼̳̻͍̏̀͐f̴̙̰̀́̾̾͛̓̀̓̿ĩ̷̧̳̯͕̗̪͖̰͜n̵̛͇̥̻̉̇̒̑͛̕i̶̢̧̦̲͖̫͙̐̊͌́̅̕t̸̜͇̄̍̑͑̍ͅe̴̮͌̌ ̸̡̱͙̜̭͍̓̋̈̔͊͝g̸͎̤̩̯̺̈́̋r̴͖̐̔͐̽̾į̵̫̦̟͚̗̺̖̩̄̈͆̋̉̂̇͊ḑ̴̢̥̜̥̘̼̼̓̏̓̽̓̋ ̶̹̖͙̃o̷̧̙̍̄͗͗͐̆̑̾̈͘f̶̗̌̑̒̓̆̑̈́̽̐͘ ̸̛̤̹̯̖̬͙̦͂͗̀́̒̿̈́́r̵̞͉̠̳͎̣̫̲̟͝ͅo̸̢͎̜̼̝̦̠͎͖̾͜ȯ̷̧̰͉̫͖̩̼̙̦͌̾͊̀m̷̢̢͈̱̭͌̂͗́͌͐͗͆ś̸͙͖̰̲̲̒̌̔͛.̴̡̙̤̥͔̱͙̏̆͌̃̅̌̍̽';
 
     // Respect HTTPS forwarded by the deployment's reverse proxy as well as direct HTTPS.
@@ -247,8 +205,19 @@
                 $meta = array_map(static fn(string $val): string => scrambleMetadata($val, $roomId), $pos);
             }
 
-            // Upload uses the existing file storage and metadata scrambling helpers
-            if ($action === 'upload') {
+            // LLM ROOM IMAGE MOVE: Check target gallery status before the browser confirmation.
+            if ($action === 'check-gallery') {
+                $targetRoomId = normalizeRoomId(trim((string) ($_POST['target_room'] ?? '')));
+                $targetDoorCount = roomDoorCount(getRoomDoors($targetRoomId, database()));
+                $res += ['targetRoom' => $targetRoomId, 'doorCount' => $targetDoorCount, 'gallery' => $targetDoorCount < 2];
+            // LLM ROOM IMAGE MOVE: Validate again under a write lock, then move the images atomically.
+            } elseif ($action === 'move-room-images') {
+                $targetRoomId = normalizeRoomId(trim((string) ($_POST['target_room'] ?? '')));
+                $movedCount = moveRoomImagesToGallery(database(), $roomId, $targetRoomId);
+                logChange('ROOM: ' . $roomId . ' | MOVED ' . $movedCount . ' IMAGES TO GALLERY: ' . $targetRoomId);
+                $res += ['moved' => $movedCount, 'targetRoom' => $targetRoomId];
+            // LLM ROOM IMAGE MOVE: END.
+            } elseif ($action === 'upload') {
                 $upload = $_FILES['image'] ?? null;
 
                 $uploadError = is_array($upload) ? ($upload['error'] ?? UPLOAD_ERR_NO_FILE) : UPLOAD_ERR_NO_FILE;
@@ -422,10 +391,7 @@
         }
 
         $next = getRoomDoors($door['neighborId'], database());
-        $door['destinationIsGallery'] = $isGallery(
-            $door['neighborId'],
-            roomDoorCount($next)
-        );
+        $door['destinationIsGallery'] = $isGallery(roomDoorCount($next));
     }
 
     unset($door);
@@ -628,29 +594,7 @@
     </head>
     <body>
         <div id="stage">
-            <h1 class="room-brand" aria-label="Y9K" hidden>h̵͔͠t̵̲̓̆ț̶̀͠p̵̯̘̈́s̴̲̙̅͋:̶̮͗̄/̸̰̅/̸̻̻́y̸̢͓͒9̷̳̔ǩ̷̹́.̸̜̀̽x̶͖̅y̵̘̪͂͠z̸͙͚̕/̵̧̽̅</h1>
-            <script>
-                (() => {
-                    const brand = document.querySelector('.room-brand');
-                    const key = 'y9k-brand-shown-at';
-                    const interval = 30 * 60 * 1000;
-                    const now = Date.now();
-                    // Remember the display time across room changes and page reloads.
-                    try {
-                        const last = Number(localStorage.getItem(key));
-                        if (last > 0 && now - last < interval) return;
-                        localStorage.setItem(key, String(now));
-                    } catch {
-                        // Still show the overlay if browser storage is unavailable.
-                    }
-                    brand.hidden = false;
-                    // Hold for three seconds, fade for twelve, then remove it from display.
-                    const fade = brand.animate([{ opacity: 1 }, { opacity: 0 }], {
-                        delay: 3000, duration: 12000, easing: 'ease-in-out', fill: 'forwards',
-                    });
-                    fade.finished.then(() => { brand.hidden = true; });
-                })();
-            </script>
+            <!-- LLM BRAND OVERLAY: TEMPORARILY DISABLED; no Zalgo URL is rendered. -->
             <!-- Shared room links/details - with 3D controls and image fallback links -->
             <details id="room-navigation">
                 <summary><?php if ($showRoomNumbers): ?>Room <?= htmlspecialchars(strtoupper($roomId), ENT_QUOTES, 'UTF-8') ?> · <?php endif; ?><?= $gallery ? 'gallery' : 'hallway' ?></summary>
@@ -698,6 +642,7 @@
             const data = <?= json_encode(
                 [
                     'id' => $roomId,
+                    'textInterfaceUrl' => $roomBase . 'text.php?room=' . rawurlencode($roomId),
                     'computer' => $computer,
                     'gallery' => $gallery,
                     'doors' => $doors,
