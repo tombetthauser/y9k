@@ -19,7 +19,7 @@ October 11, 2026. Estimates count added or changed lines, including comments; th
 
 Remaining total: roughly **530–970 lines**, including comments and separately listed tests. Door rules and URL fallback can proceed independently. See [ROOM_URL_FALLBACK.md](ROOM_URL_FALLBACK.md) for URL semantics and routing exceptions.
 
-Hallway uploads are removed from scope. Upload limits, expanded validation, and resizing are deferred to V2. No permanent room index is wanted. Metadata migration/versioning is unnecessary for the selected fresh database.
+Hallway uploads are removed from scope. Upload limits, expanded validation, and resizing originals are deferred to V2. Background thumbnail derivatives are separate; preserve and back up existing content before the schema migration, and verify the worker and original-image fallback as described in the [deployment plan](DEPLOYMENT_PLAN.md). No permanent room index is wanted. Metadata cipher migration/versioning is unnecessary for this thumbnail upgrade.
 
 RSA block room encoding is also deferred to V2; see [ROOM_ENCODING_V2.md](ROOM_ENCODING_V2.md). Budget approximately 100–180 implementation/integration lines plus 50–100 test lines, outside the V1 totals. V1 retains SHA-256 room lookup with negligible practical but nonzero theoretical collision risk.
 
@@ -29,8 +29,8 @@ User decision: defer application upload size limits, additional input/placement 
 
 ## Temporary logs; no permanent room index
 
-Do not create a permanent hash-to-room mapping. Individual changes use the canonical room ID already in the request to write temporary readable logs. Logs may be periodically cleared or removed without affecting operation. Bulk resets write only `HOLES RESET` or `THINGS RESET`, without per-room recovery. Next step is verifying fresh-database metadata integration, then completing opaque image storage and delivery.
+Do not create a permanent hash-to-room mapping. Individual changes use the canonical room ID already in the request to write temporary readable logs. Logs may be periodically cleared or removed without affecting operation. Bulk resets write only `HOLES RESET` or `THINGS RESET`, without per-room recovery. Verify metadata integration and opaque image storage and delivery against the preserved content.
 
 ## Current progress
 
-Cipher helpers live in `src/tools.php`, following the preference to keep shared helpers there. `scripts/CHECK-cipher.php` passes all 26 checks, and the existing nine hole checks pass. Metadata integration needs final fresh-database/browser verification; no old-record migration is planned. These line estimates are whole-item estimates, not measurements of remaining work.
+Cipher helpers live in `src/tools.php`, following the preference to keep shared helpers there. `testing/CHECK-cipher.php` passes all 26 checks, and the existing nine hole checks pass. Metadata integration needs final browser verification. The one-time thumbnail schema migration preserves existing records and files. These line estimates are whole-item estimates, not measurements of remaining work.

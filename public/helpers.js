@@ -341,6 +341,188 @@ export const storedPlacement = (p) => {
     return { wall: p.segment ?? CARDINAL_WALLS.indexOf(p.wall), x: p.x * 2.54, y: p.y * 2.54, width: p.width * 2.54 };
 };
 
+export const createImageOriginalPrefetcher = ({
+    concurrency = 2,
+    maxEntries = 64,
+    maxBytes = 64 * 1024 * 1024,
+    fetchImpl = (...args) => fetch(...args),
+    createObjectURL = blob => URL.createObjectURL(blob),
+    revokeObjectURL = url => URL.revokeObjectURL(url),
+    eventTarget = typeof window === "undefined" ? null : window,
+} = {}) => {
+    const entries = new Map(), queue = [];
+    class PrefetchLimitError extends Error { }
+    let active = 0, cachedBytes = 0, inflightBytes = 0, clock = 0, disposed = false;
+    const releaseInflight = entry => {
+        inflightBytes -= entry.inflightSize;
+        entry.inflightSize = 0;
+    };
+    const revoke = entry => {
+        if (!entry.objectUrl) return;
+        revokeObjectURL(entry.objectUrl);
+        cachedBytes -= entry.size;
+        entry.objectUrl = null;
+        entry.size = 0;
+    };
+    const evictOldest = () => {
+        const oldest = [...entries.values()]
+            .filter(entry => entry.objectUrl && !entry.pinned)
+            .sort((a, b) => a.used - b.used)[0];
+        if (!oldest) return false;
+        entries.delete(oldest.key);
+        revoke(oldest);
+        return true;
+    };
+    const trim = () => {
+        while ([...entries.values()].filter(entry => entry.objectUrl).length > maxEntries
+            || cachedBytes + inflightBytes > maxBytes) {
+            if (!evictOldest()) break;
+        }
+    };
+    // Reserve room against cached plus concurrent streamed bytes, not just completed blobs.
+    const makeRoom = size => {
+        while (cachedBytes + inflightBytes + size > maxBytes) {
+            if (!evictOldest()) return false;
+        }
+        return true;
+    };
+    const readBoundedBody = async (response, entry) => {
+        const length = response.headers?.get?.("content-length");
+        if (length != null && /^\d+$/.test(String(length).trim()) && Number(length) > maxBytes) {
+            response.body?.cancel?.().catch?.(() => {});
+            throw new PrefetchLimitError("Original image exceeds the prefetch size limit.");
+        }
+        const reader = response.body?.getReader?.();
+        if (!reader) throw new Error("Streaming is unavailable for this image response.");
+        entry.reader = reader;
+        const chunks = [];
+        let completed = false;
+        try {
+            while (true) {
+                if (disposed || entries.get(entry.key) !== entry)
+                    throw new Error("Image prefetch was cancelled.");
+                const { done, value } = await reader.read();
+                if (done) break;
+                const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+                if (!makeRoom(chunk.byteLength)) {
+                    reader.cancel().catch(() => {});
+                    throw new PrefetchLimitError("Image prefetch byte limit reached.");
+                }
+                chunks.push(chunk);
+                entry.inflightSize += chunk.byteLength;
+                inflightBytes += chunk.byteLength;
+            }
+            if (disposed || entries.get(entry.key) !== entry)
+                throw new Error("Image prefetch was cancelled.");
+            const blob = new Blob(chunks, { type: response.headers?.get?.("content-type") || "" });
+            completed = true;
+            return blob;
+        }
+        finally {
+            entry.reader = null;
+            if (!completed) {
+                reader.cancel().catch(() => {});
+                releaseInflight(entry);
+            }
+        }
+    };
+    const drain = () => {
+        while (!disposed && active < Math.max(1, concurrency) && queue.length) {
+            const entry = queue.shift();
+            if (entries.get(entry.key) !== entry) continue;
+            active++;
+            (async () => {
+                try {
+                    const response = await fetchImpl(entry.url, { signal: entry.controller.signal });
+                    if (!response.ok) throw new Error(`Image fetch failed: ${response.status}`);
+                    const blob = await readBoundedBody(response, entry);
+                    if (entries.get(entry.key) !== entry || disposed) return;
+                    entry.objectUrl = createObjectURL(blob);
+                    entry.size = blob.size;
+                    releaseInflight(entry);
+                    entry.used = ++clock;
+                    cachedBytes += entry.size;
+                    trim();
+                    entry.resolve(entries.get(entry.key) === entry ? entry.objectUrl : null);
+                }
+                catch (error) {
+                    if (entries.get(entry.key) === entry) {
+                        entries.delete(entry.key);
+                        if (!disposed && !entry.controller.signal.aborted && !(error instanceof PrefetchLimitError))
+                            console.warn("Original image prefetch failed:", entry.url, error);
+                    }
+                    entry.resolve(null);
+                }
+                finally {
+                    if (entry.inflightSize) releaseInflight(entry);
+                    active--;
+                    drain();
+                }
+            })();
+        }
+    };
+    const remove = key => {
+        const entry = entries.get(String(key));
+        if (!entry) return;
+        entries.delete(entry.key);
+        entry.controller.abort();
+        entry.reader?.cancel().catch(() => {});
+        const index = queue.indexOf(entry);
+        if (index >= 0) queue.splice(index, 1);
+        revoke(entry);
+        entry.resolve(null);
+    };
+    const onPageHide = () => api.dispose();
+    const api = {
+        enqueue(key, url) {
+            key = String(key);
+            if (disposed || typeof url !== "string" || !url || /^(blob:|data:)/i.test(url)) return Promise.resolve(null);
+            const previous = entries.get(key);
+            if (previous?.url === url) {
+                previous.used = ++clock;
+                return previous.objectUrl ? Promise.resolve(previous.objectUrl) : previous.promise;
+            }
+            if (previous) remove(key);
+            let resolve;
+            const promise = new Promise(done => { resolve = done; });
+            const entry = { key, url, controller: new AbortController(), promise, resolve, objectUrl: null, size: 0, inflightSize: 0, reader: null, used: ++clock, pinned: 0 };
+            entries.set(key, entry);
+            queue.push(entry);
+            drain();
+            return promise;
+        },
+        get(key) {
+            const entry = entries.get(String(key));
+            if (!entry?.objectUrl) return null;
+            entry.used = ++clock;
+            return entry.objectUrl;
+        },
+        pin(key) {
+            const entry = entries.get(String(key));
+            if (!entry?.objectUrl) return null;
+            entry.pinned++;
+            entry.used = ++clock;
+            return entry.objectUrl;
+        },
+        unpin(key) {
+            const entry = entries.get(String(key));
+            if (!entry) return;
+            entry.pinned = Math.max(0, entry.pinned - 1);
+            trim();
+        },
+        remove,
+        dispose() {
+            if (disposed) return;
+            disposed = true;
+            eventTarget?.removeEventListener?.("pagehide", onPageHide);
+            for (const key of [...entries.keys()]) remove(key);
+            queue.length = 0;
+        },
+    };
+    eventTarget?.addEventListener?.("pagehide", onPageHide, { once: true });
+    return api;
+};
+
 const CARDINAL_WALLS = ["north", "east", "south", "west"];
 
 const INCHES_PER_WORLD_UNIT = 20;
@@ -539,6 +721,10 @@ export class Room {
         this.commands = [];
         this.images = new Map();
         this.ready = Promise.resolve(this);
+        this._originalPrefetcher = null;
+        this._originalPrefetchStarted = false;
+        this._lightboxOriginalId = null;
+        this._lightboxPinnedId = null;
         for (const [wall, value] of Object.entries(options.doors || {})) {
             if (value && value.exists !== false)
                 this.addDoor(wall, value === true ? {} : value);
@@ -551,8 +737,8 @@ export class Room {
         if (this.app)
             throw new Error("Set doors before mount(); hallway outlines depend on them.");
         const name = roomWall(wall);
-        if (!this.hallway && !this.doors[name] && this.doorCount() === 1)
-            throw new Error("A Gallery can have at most one door.");
+        // Galleries can use every wall when the gallery-percentage experiment selects them.
+        // roomWall() keeps doors limited to the four cardinal walls.
         this.doors[name] = { locked: false, ...options };
         return this;
     }
@@ -665,6 +851,12 @@ export class Room {
                 return turning;
             },
         });
+        this.app.lightbox?.setCloseHandler?.(() => {
+            if (this._lightboxPinnedId != null)
+                this._originalPrefetcher?.unpin(this._lightboxPinnedId);
+            this._lightboxPinnedId = null;
+            this._lightboxOriginalId = null;
+        });
         if (!this.hallway && o.galleryFillIntensity > 0) {
             // Centered omnidirectional light with distance falloff, active only while electric lights are off.
             this.galleryFillLight = new THREE.PointLight(o.galleryFillColor, o.galleryFillIntensity,
@@ -742,6 +934,7 @@ export class Room {
             this._addReferenceGallery();
         for (const task of this.commands.splice(0))
             await task();
+        this._startOriginalImagePrefetch();
         if (o.editor && !this.hallway)
             this.enableEditor();
         if (o.editor || (this.hallway && o.hallwayUploads))
@@ -1427,12 +1620,99 @@ export class Room {
         }
         else if (data.imageFile) {
             this.selectImage(data.roomImageId);
-            this.app.lightbox.open(data.imageFile, this.app.music.isSoundOn(), data.imageName, { source: object });
+            this._openArtwork(object);
         }
         this.options.onHit?.(object, this);
     }
 
-    addImage({ wall = "north", x = 0, y = this.options.artY, width = this.options.artWidth, file, id = null, name = null, editable = true, segment = null } = {}) {
+    _startOriginalImagePrefetch() {
+        this._originalPrefetchStarted = true;
+        if (!this._originalPrefetchLifecycle && typeof window !== "undefined") {
+            const hide = () => {
+                const art = this.images.get(this._lightboxOriginalId);
+                if (art?.userData.imageFile)
+                    this.app?.lightbox?.setImageSource?.(art.userData.imageFile, art);
+                this._lightboxPinnedId = null;
+                const prefetcher = this._originalPrefetcher;
+                this._originalPrefetcher = null;
+                prefetcher?.dispose();
+            };
+            const show = event => {
+                if (event.persisted)
+                    this._startOriginalImagePrefetch();
+            };
+            window.addEventListener("pagehide", hide);
+            window.addEventListener("pageshow", show);
+            this._originalPrefetchLifecycle = { hide, show };
+        }
+        this._originalPrefetcher ??= createImageOriginalPrefetcher({ eventTarget: null });
+        for (const [id, art] of this.images)
+            this._prefetchOriginalImage(id, art);
+    }
+
+    _prefetchOriginalImage(id, art) {
+        const original = art?.userData.imageFile;
+        const prefetcher = this._originalPrefetcher;
+        if (!prefetcher || !art?.userData.imageThumbnailUrl
+            || art.userData.imageThumbnailUrl === original || !original)
+            return;
+        prefetcher.enqueue(id, original).then(blobUrl => {
+            if (!blobUrl || this._originalPrefetcher !== prefetcher
+                || this.images.get(String(id)) !== art || art.userData.imageFile !== original
+                || prefetcher.get(id) !== blobUrl) return;
+            if (this._lightboxOriginalId === String(id)) {
+                if (this._lightboxPinnedId !== String(id)
+                    && prefetcher.pin(id))
+                    this._lightboxPinnedId = String(id);
+                this.app?.lightbox?.setImageSource?.(blobUrl, art);
+            }
+        });
+    }
+
+    _openArtwork(art) {
+        const id = String(art.userData.roomImageId);
+        if (this._lightboxPinnedId != null)
+            this._originalPrefetcher?.unpin(this._lightboxPinnedId);
+        this._lightboxPinnedId = null;
+        this._lightboxOriginalId = id;
+        const original = art.userData.imageFile;
+        const cached = this._originalPrefetcher?.pin(id);
+        if (cached)
+            this._lightboxPinnedId = id;
+        this.app.lightbox?.open(cached || original, this.app.music.isSoundOn(), art.userData.imageName, {
+            source: art,
+            captionUrl: original,
+        });
+    }
+
+    _replaceArtworkTexture(art, preferredUrl, fallbackUrl) {
+        if (!preferredUrl || !this.app?.textureLoader) return;
+        const token = art.userData.textureRequestToken = (art.userData.textureRequestToken ?? 0) + 1;
+        const load = (url, fallback) => {
+            this.app.textureLoader.load(url, texture => {
+                if (token !== art.userData.textureRequestToken || ![...this.images.values()].includes(art)) {
+                    texture.dispose();
+                    return;
+                }
+                texture.colorSpace = THREE.SRGBColorSpace;
+                texture.magFilter = THREE.NearestFilter;
+                texture.minFilter = THREE.NearestFilter;
+                const material = art.material;
+                material.map?.dispose();
+                material.map = texture;
+                material.needsUpdate = true;
+                art.userData.wallImageFile = url;
+            }, undefined, () => {
+                if (token === art.userData.textureRequestToken && fallback && fallback !== url)
+                    load(fallback, null);
+                else if (token === art.userData.textureRequestToken)
+                    console.warn("Could not load uploaded wall image:", url);
+            });
+        };
+        load(preferredUrl, fallbackUrl);
+    }
+
+    addImage({ wall = "north", x = 0, y = this.options.artY, width = this.options.artWidth, file, thumbnailUrl = null, id = null, name = null, editable = true, segment = null } = {}) {
         if (!file)
             throw new Error("addImage needs a URL, File, or Blob in file.");
         if (this.hallway && typeof wall === "number") segment = wall;
@@ -1451,12 +1731,15 @@ export class Room {
             const bounds = this._wallBounds(anchor);
             const add = createAddUserWallImage({ ...this.app, ...this.layout, bounds,
                 wallInset: this.hallway ? (this.layout.wallInset ?? 0.05) + inchesToWorld(0.01) : this.layout.wallInset });
-            const art = await add(wall, inchesToWorld(x) * wallRightSign(wall), file, inchesToWorld(width), {
+            const imageSource = thumbnailUrl ? { url: file, thumbnailUrl, displayName: name } : file;
+            const art = await add(wall, inchesToWorld(x) * wallRightSign(wall), imageSource, inchesToWorld(width), {
                 heightFromFloor: this.layout.height / 2 + inchesToWorld(y),
             });
             if (!art)
                 throw new Error("Could not load image: " + (name ?? id));
             art.userData.roomImageId = String(id);
+            art.userData.imageFile = typeof file === "string" ? file : art.userData.imageFile;
+            art.userData.imageThumbnailUrl = thumbnailUrl || null;
             art.userData.segment = segment;
             art.userData.artWallInset = this.hallway ? (this.layout.wallInset ?? 0.05) + inchesToWorld(0.01) : this.layout.wallInset;
             art.userData.editable = editable;
@@ -1465,6 +1748,8 @@ export class Room {
                 art.userData.imageName = name;
             this.images.set(String(id), art);
             layerWallImages(this.images.values());
+            if (this._originalPrefetchStarted)
+                this._prefetchOriginalImage(id, art);
         });
     }
 
@@ -1478,7 +1763,7 @@ export class Room {
 
     async placeImage(image) {
         if (!this.images.has(String(image.id))) {
-            this.addImage({ id: image.id, file: image.url, name: image.filename });
+            this.addImage({ id: image.id, file: image.url, thumbnailUrl: image.thumbnailUrl, name: image.filename });
             await this.ready;
         }
         this.selectImage(image.id);
@@ -1489,12 +1774,12 @@ export class Room {
         return this;
     }
 
-    addDatabaseImages(rows, { url = row => row.url } = {}) {
+    addDatabaseImages(rows, { url = row => row.url, thumbnailUrl = row => row.thumbnailUrl } = {}) {
         for (const row of rows) {
             if (row.wall == null || row.x == null || row.y == null || !(row.width > 0))
                 continue;
             this.addImage({
-                id: row.id, name: row.filename, file: url(row), wall: Number(row.wall),
+                id: row.id, name: row.filename, file: url(row), thumbnailUrl: thumbnailUrl(row), wall: Number(row.wall),
                 x: row.x / 2.54, y: row.y / 2.54, width: row.width / 2.54
             });
         }
@@ -1554,6 +1839,9 @@ export class Room {
         if (persist && this.options.persistence?.delete)
             await this.options.persistence.delete(this.imagePlacement(id), art);
         this.app.lightbox?.close();
+        this._originalPrefetcher?.remove(String(id));
+        if (this._lightboxOriginalId === String(id))
+            this._lightboxOriginalId = null;
         removeUserWallImage(art, { clickable: this.app.clickable });
         this.images.delete(String(id));
         layerWallImages(this.images.values());
@@ -1960,14 +2248,19 @@ export class Room {
                 const result = await storage.upload(this.imagePlacement(id), file);
                 // Keep the existing preview mesh, replacing only its temporary identity.
                 const art = this.images.get(id);
+                this._originalPrefetcher?.remove(id);
                 this.images.delete(id);
                 id = String(result.id);
                 art.userData.roomImageId = id;
                 art.userData.imageName = result.filename ?? file.name;
                 if (art.userData.imageFile?.startsWith("blob:")) URL.revokeObjectURL(art.userData.imageFile);
-                art.userData.imageFile = result.url;
+                art.userData.imageFile = result.url ?? art.userData.imageFile;
+                art.userData.imageThumbnailUrl = result.thumbnailUrl ?? null;
                 this.images.set(id, art);
+                this._replaceArtworkTexture(art, result.thumbnailUrl || result.url, result.url);
                 layerWallImages(this.images.values());
+                if (this._originalPrefetchStarted)
+                    this._prefetchOriginalImage(id, art);
                 file = null;
                 fields.file.value = "";
             } else {
@@ -2806,11 +3099,12 @@ export const setupLightbox = ({ root = document.getElementById("lightbox"), sfxP
             });
         };
         img.src = imageFile;
-        caption.href = imageFile.startsWith("blob:") ? "#" : imageFile;
+        const captionUrl = opts.captionUrl ?? imageFile;
+        caption.href = captionUrl.startsWith("blob:") ? "#" : captionUrl;
         const label = displayName ||
-            (imageFile.startsWith("blob:")
+            (captionUrl.startsWith("blob:")
                 ? "uploaded image"
-                : imageFile.split("/").pop());
+                : captionUrl.split("/").pop());
         caption.textContent = wallTextKind(displayName) ? '' : label;
         caption.hidden = Boolean(wallTextKind(displayName));
         root.classList.add("is-open");
@@ -2832,9 +3126,15 @@ export const setupLightbox = ({ root = document.getElementById("lightbox"), sfxP
         currentSource = null;
         syncDeleteButton();
         resetZoom();
+        closeHandler?.();
     };
     const isOpen = () => {
         return root.classList.contains("is-open");
+    };
+    const setImageSource = (imageFile, source) => {
+        if (!isOpen() || currentSource !== source) return false;
+        img.src = imageFile;
+        return true;
     };
     const remeasure = () => {
         if (!isOpen())
@@ -2952,6 +3252,7 @@ export const setupLightbox = ({ root = document.getElementById("lightbox"), sfxP
             close();
     });
     let currentSource = null;
+    let closeHandler = null;
     let userArtDeleteHandler = null;
     let deleteBtn = document.getElementById("lightbox-delete");
     if (!deleteBtn) {
@@ -2994,8 +3295,10 @@ export const setupLightbox = ({ root = document.getElementById("lightbox"), sfxP
         open,
         close,
         isOpen,
+        setImageSource,
         remeasure,
         setUserArtDeleteHandler,
+        setCloseHandler: fn => { closeHandler = typeof fn === "function" ? fn : null; },
         unlockAudio: ensureAudioCtx,
         getCurrentSource: () => currentSource,
     };
@@ -4707,9 +5010,22 @@ const resolveUserImageSource = (imageSource) => {
     if (typeof imageSource === "string") {
         return {
             url: imageSource,
+            originalUrl: imageSource,
+            thumbnailUrl: null,
             displayName: imageSource.startsWith("blob:")
                 ? "uploaded image"
                 : imageSource.split("/").pop() || null,
+        };
+    }
+    if (imageSource && typeof imageSource === "object" && typeof imageSource.url === "string") {
+        const originalUrl = imageSource.url;
+        return {
+            url: typeof imageSource.thumbnailUrl === "string" && imageSource.thumbnailUrl
+                ? imageSource.thumbnailUrl : originalUrl,
+            originalUrl,
+            thumbnailUrl: imageSource.thumbnailUrl || null,
+            displayName: imageSource.displayName || (originalUrl.startsWith("blob:")
+                ? "uploaded image" : originalUrl.split("/").pop() || null),
         };
     }
     if (typeof Blob !== "undefined" && imageSource instanceof Blob) {
@@ -4718,19 +5034,20 @@ const resolveUserImageSource = (imageSource) => {
             imageSource.name
             ? imageSource.name
             : "uploaded image";
-        return { url: URL.createObjectURL(imageSource), displayName: name };
+        const url = URL.createObjectURL(imageSource);
+        return { url, originalUrl: url, thumbnailUrl: null, displayName: name };
     }
     console.warn("resolveUserImageSource: unsupported image source", imageSource);
-    return { url: "", displayName: null };
+    return { url: "", originalUrl: "", thumbnailUrl: null, displayName: null };
 };
 
 export const createAddUserWallImage = ({ scene, textureLoader, roomHalfY, floorY = -roomHalfY, ceilingY = roomHalfY, heightFromFloor = DEFAULT_ART_HEIGHT_FROM_FLOOR, clickable, bounds, wallInset = 0.05, }) => {
     return (wall, x, imageSource, imageWidth = DEFAULT_USER_ART_WIDTH, { heightFromFloor: heightFromFloorOpt } = {}) => {
-        const { url, displayName } = resolveUserImageSource(imageSource);
+        const { url, originalUrl, thumbnailUrl, displayName } = resolveUserImageSource(imageSource);
         if (!url)
             return Promise.resolve(null);
         return new Promise((resolve) => {
-            textureLoader.load(url, (tex) => {
+            const finish = (tex, loadedUrl) => {
                 tex.colorSpace = THREE.SRGBColorSpace;
                 tex.magFilter = THREE.NearestFilter;
                 tex.minFilter = THREE.NearestFilter;
@@ -4746,6 +5063,8 @@ export const createAddUserWallImage = ({ scene, textureLoader, roomHalfY, floorY
                 const hffRaw = heightFromFloorOpt ?? heightFromFloor;
                 const hff = Math.max(0, Math.min(roomH, hffRaw));
                 if (!placeOnWall(art, wall, x, null, imageWidth / 2, bounds, wallInset, { heightFromFloor: hff, floorY, clamp: "center" })) {
+                    tex.dispose();
+                    if (originalUrl.startsWith("blob:")) URL.revokeObjectURL(originalUrl);
                     resolve(null);
                     return;
                 }
@@ -4759,7 +5078,9 @@ export const createAddUserWallImage = ({ scene, textureLoader, roomHalfY, floorY
                     ? (xClamped + maxAlong) / (2 * maxAlong)
                     : 0.5;
                 const uY = roomH > 1e-6 ? hff / roomH : 0.5;
-                art.userData.imageFile = url;
+                art.userData.imageFile = originalUrl;
+                art.userData.wallImageFile = loadedUrl;
+                art.userData.imageThumbnailUrl = thumbnailUrl;
                 art.userData.imageName = displayName;
                 art.userData.isUserArt = true;
                 art.userData.artWidth = imageWidth;
@@ -4774,9 +5095,16 @@ export const createAddUserWallImage = ({ scene, textureLoader, roomHalfY, floorY
                 clickable.push(art);
                 scene.add(art);
                 resolve(art);
-            }, undefined, () => {
+            };
+            const fail = () => {
                 console.warn("addUserWallImage: failed to load", displayName || url);
+                if (originalUrl.startsWith("blob:")) URL.revokeObjectURL(originalUrl);
                 resolve(null);
+            };
+            const loadOriginal = () => textureLoader.load(originalUrl, tex => finish(tex, originalUrl), undefined, fail);
+            textureLoader.load(url, tex => finish(tex, url), undefined, () => {
+                if (thumbnailUrl && url !== originalUrl) loadOriginal();
+                else fail(url);
             });
         });
     };

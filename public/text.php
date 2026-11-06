@@ -34,6 +34,15 @@
         $images[] = restoreImageMetadata($image, $roomId);
     }
 
+    // LLM THUMBNAIL BACKFILL: BEGIN queue old images after loading this room.
+    try {
+        queueRoomThumbnails(database(), $roomId);
+    } catch (PDOException $error) {
+        // The original links remain usable if the job queue is unavailable.
+        error_log('Could not queue room thumbnails: ' . $error->getMessage());
+    }
+    // LLM THUMBNAIL BACKFILL: END queue old images after loading this room.
+
     $imageCount = count($images);
 
     $placed = roomLetters(

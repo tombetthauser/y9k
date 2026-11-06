@@ -4,17 +4,17 @@ Deploy Y9K to a Raspberry Pi with SD card storage, and publish it at the root of
 
 Before exposing PHP publicly, complete the runtime update and hosting verification in [the October 2026 security review](SECURITY_REVIEW_2026-10.md). This adds urgent PHP patch verification without changing the agreed V1 application scope.
 
-Remaining application scope and its implementation order are recorded in [V1_COMPLETION_PLAN.md](V1_COMPLETION_PLAN.md). The latest scope is trusted-user V1 with application upload limits, expanded validation, and resizing deferred to V2. Before deployment, complete the remaining storage, doorway rules, logging, fallback hallway image links (no hallway uploads), and admin work in the checklist.
+Remaining application scope and its implementation order are recorded in [V1_COMPLETION_PLAN.md](V1_COMPLETION_PLAN.md). The latest scope is trusted-user V1 with application upload limits, expanded validation, and resizing of originals deferred to V2. Thumbnail derivatives are a separate feature. Before deployment, complete the remaining storage, doorway rules, logging, fallback hallway image links (no hallway uploads), and admin work in the checklist.
 
 ## Agreed setup
 
 - Use the simplest suitable headless OS: Raspberry Pi OS Lite, subject to confirming the board model.
 - Run Apache and PHP natively, with SQLite, GMP, and the PHP extensions required by the application.
 - Store the database and uploaded images on the SD card initially.
-- Start with an empty database and no existing uploaded content.
+- Preserve existing databases and uploaded content when enabling thumbnails; fresh installations can still start empty.
 - Keep tracking the project in GitHub and perform updates manually over SSH.
 - Allow public uploads and deletion without login or authentication, as requested.
-- Keep existing upload handling for V1; application upload limits and resizing are deferred to V2 by user decision.
+- Keep original uploads unchanged; application upload limits and resizing originals are deferred to V2 by user decision.
 - Expect low usage, with availability dependent on the Pi's power and internet connection.
 - Use a dashboard-managed Cloudflare Tunnel, with the web server and tunnel starting automatically at boot.
 - Use the existing Cloudflare account and buy a new domain, possibly `y9k.club`; the domain is not yet selected or purchased.
@@ -59,6 +59,65 @@ Domain activation may add waiting time outside the hands-on estimate. Hardware o
 - Back up SQLite using a consistent snapshot and preserve its corresponding uploaded images; document how to restore both.
 - Verify the effective PHP/web-server/Cloudflare request ceilings; adding application limits is deferred to V2.
 - Verify the public site and its ability to recover after a reboot before considering deployment complete.
+
+## Existing thumbnail data upgrade
+
+The existing local and deployed databases use the compatible scrambled-image
+schema. Stop all web writers and thumbnail workers before the upgrade, and
+back up the complete `data/` directory while stopped, including SQLite
+sidecars, images, and any thumbnails. Check that the backup is complete before
+proceeding. Copy the new code during the maintenance window, then run
+`php testing/migrate-thumbnails.php` from the project directory. It refuses
+missing databases, unexpected `things` schemas, existing thumbnail columns, and
+existing job tables; it does not change originals or door rows.
+
+Restart the web process and worker with appropriate shared write permissions.
+On a room visit, older pending images in that room are queued using the room ID
+from the request; rooms that are never visited remain unprocessed. Failed and
+intentionally skipped images continue to use their originals, and aren't
+automatically retried on each visit. For rollback, stop writers first and
+restore the matching pre-upgrade code, database, and images from the backup.
+Changes made after the backup would be lost; preserve a new backup before
+considering a rollback.
+
+## Thumbnail worker
+
+The web process saves an upload and its thumbnail job together. A separate
+long-running `php testing/thumbnail-worker.php` process consumes the queue.
+Configure a service manager to restart it on failure and start it at boot.
+Use the same PHP extensions and filesystem/database permissions as the web
+process, including GD with JPEG, PNG, GIF, and WebP support, fileinfo, SQLite,
+and GMP. Verify EXIF support for JPEG orientation.
+
+The SQLite job queue temporarily contains the canonical room ID until a job
+finishes; deleted data may persist in SQLite journals, free pages, or backups,
+so protect those files accordingly. Originals and
+scrambled derivatives are stored separately under `data/images/` and
+`data/thumbnails/`. Back them up consistently with SQLite. The originals
+remain authoritative; do not delete existing content to install this change.
+Verify both workers and web requests after reboot, including pending and failed
+jobs. The sample below requires replacing the account and absolute paths:
+
+```ini
+[Unit]
+Description=Y9K thumbnail worker
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_WEB_USER
+WorkingDirectory=/PATH/TO/y9k
+ExecStart=/usr/bin/php /PATH/TO/y9k/testing/thumbnail-worker.php
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Install this as a systemd unit only after verifying the actual PHP binary,
+user, paths, extensions, and writable data permissions. Review service logs for
+processing errors. A local development worker must also be started separately.
 
 ## References
 

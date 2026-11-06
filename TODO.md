@@ -16,7 +16,8 @@ Updated October 23, 2026; existing features still need final checks where listed
 - [ ] Keep unexpected images viewable and removable, and prevent hallway uploads.
 - [ ] Make messy room addresses lead to a valid room.
 - [ ] Verify temporary logs record changes and only summaries for bulk resets.
-- [ ] Stop logging image views so ordinary browsing does not keep rewriting the log.
+- [x] Stop logging image views so ordinary browsing does not keep rewriting the log.
+- [ ] Verify thumbnail processing, original-image preloading, and worker restart on the Pi.
 - [ ] Fix admin reset buttons and redirects to use the correct page address.
 - [ ] Finish the unlinked admin page with readable room links and separate, confirmed resets.
 - [ ] Check browsing, uploads, image edits, doors, logs, and resets together using disposable content.
@@ -36,7 +37,7 @@ Updated October 23, 2026; existing features still need final checks where listed
 
 - [ ] Explore a different room-number encoding after reviewing its design.
 - [ ] Add upload limits, stronger input checks, reserved filenames, and handler cleanup.
-- [ ] Add automatic image resizing and rotation, and decide how to handle HEIC and animations.
+- [ ] Add automatic resizing and rotation of originals, and decide how to handle HEIC and animations.
 - [ ] Improve image placement and prevent artwork from overlapping doorways.
 - [ ] Add automatic log size management if needed.
 
@@ -46,6 +47,6 @@ Updated October 23, 2026; existing features still need final checks where listed
 - Stored images are scrambled, not protected as private encrypted content.
 - Logs are disposable; do not add a permanent room recovery index.
 - Hallway uploads stay outside V1, but unexpected hallway images keep accessible links.
-- Current storage setup starts with a fresh database; no migration or content deletion is planned.
+- Preserve existing databases and images; back up before the thumbnail schema migration. No content deletion is planned.
 
 Details: [V1 plan](docs/V1_COMPLETION_PLAN.md), [deployment plan](docs/DEPLOYMENT_PLAN.md), and [security review](docs/SECURITY_REVIEW_2026-10.md).

@@ -449,6 +449,356 @@ function imageUrl(string $roomId, string $filekey): string
     return '/image.php?r=' . rawurlencode(normalizeRoomId($roomId)) . '&k=' . rawurlencode($filekey);
 }
 
+// LLM THUMBNAIL BACKFILL: BEGIN queue old images using the visited room ID.
+function queueRoomThumbnails(PDO $pdo, string $roomId): void
+{
+    $roomId = normalizeRoomId($roomId);
+    $roomHash = hashRoomId($roomId);
+
+    // Avoid taking a write lock on ordinary visits when nothing needs a job.
+    $find = $pdo->prepare(
+        "SELECT 1 FROM things
+         WHERE room = :room AND thumbnail = 'pending'
+         AND NOT EXISTS (SELECT 1 FROM thumbnail_jobs WHERE thing_id = things.id)
+         LIMIT 1"
+    );
+    $find->execute(['room' => $roomHash]);
+    $needsJob = $find->fetchColumn() !== false;
+    $find->closeCursor();
+
+    if (!$needsJob) {
+        return;
+    }
+
+    // Recheck the rows while inserting, so concurrent visits cannot duplicate jobs.
+    $queue = $pdo->prepare(
+        "INSERT INTO thumbnail_jobs (thing_id, room_id)
+         SELECT id, :room_id FROM things
+         WHERE room = :room_hash AND thumbnail = 'pending'
+         ON CONFLICT(thing_id) DO NOTHING"
+    );
+    $queue->execute(['room_id' => $roomId, 'room_hash' => $roomHash]);
+}
+// LLM THUMBNAIL BACKFILL: END queue old images using the visited room ID.
+
+// LLM THUMBNAILS: BEGIN generated thumbnail processing and cleanup helpers.
+function thumbnailStoragePath(string $filekey): string
+{
+    // Reuse the original's strict storage-key validation.
+    imageStoragePath($filekey);
+    return dirname(__DIR__) . '/data/thumbnails/' . $filekey;
+}
+
+function thumbnailUrl(string $roomId, string $filekey): string
+{
+    return imageUrl($roomId, $filekey) . '&variant=thumbnail';
+}
+
+function removeStoredFile(string $path): void
+{
+    if ((file_exists($path) || is_link($path)) && !@unlink($path)) {
+        throw new RuntimeException('Could not remove stored file: ' . basename($path));
+    }
+}
+
+function removeThingFiles(string $filekey): void
+{
+    $thumbnail = thumbnailStoragePath($filekey);
+    // A deterministic staging name lets deletion and a restarted worker clean up after a crash.
+    removeStoredFile($thumbnail . '.tmp');
+    removeStoredFile($thumbnail);
+    removeStoredFile(imageStoragePath($filekey));
+}
+
+function assertThumbnailCapabilities(): void
+{
+    // Missing GD capabilities are a worker configuration error, not a bad upload.
+    if (!extension_loaded('gd') || !function_exists('gd_info')) {
+        throw new RuntimeException('Thumbnail worker requires the GD extension');
+    }
+    $info = gd_info();
+    foreach (['GIF Read Support', 'GIF Create Support', 'JPEG Support', 'PNG Support', 'WebP Support'] as $capability) {
+        if (empty($info[$capability])) {
+            throw new RuntimeException('Missing GD capability: ' . $capability);
+        }
+    }
+    foreach (['imagecreatefromstring', 'imagecreatetruecolor', 'imagecopyresampled', 'imageflip',
+        'imagerotate', 'imagegif', 'imagejpeg', 'imagepng', 'imagewebp'] as $function) {
+        if (!function_exists($function)) {
+            throw new RuntimeException('Missing GD function: ' . $function);
+        }
+    }
+}
+
+function deleteStoredThing(PDO $pdo, int $id, string $roomId): ?string
+{
+    $roomId = normalizeRoomId($roomId);
+    $pdo->exec('BEGIN IMMEDIATE');
+    try {
+        $find = $pdo->prepare('SELECT filename, filekey FROM things WHERE id = ? AND room = ?');
+        $find->execute([$id, hashRoomId($roomId)]);
+        $thing = $find->fetch(PDO::FETCH_ASSOC);
+        if ($thing === false) {
+            $pdo->exec('COMMIT');
+            return null;
+        }
+        $filename = restoreMetadata($thing['filename'], $roomId);
+        removeThingFiles($thing['filekey']);
+        $pdo->prepare('DELETE FROM thumbnail_jobs WHERE thing_id = ?')->execute([$id]);
+        $pdo->prepare('DELETE FROM things WHERE id = ?')->execute([$id]);
+        $pdo->exec('COMMIT');
+        return $filename;
+    } catch (Throwable $error) {
+        $pdo->exec('ROLLBACK');
+        throw $error;
+    }
+}
+
+// LLM THUMBNAILS: BEGIN generated metadata-aware image classification.
+function thumbnailImageKind(string $bytes): string
+{
+    // GIF is always skipped: GD would silently discard any additional frames.
+    if (str_starts_with($bytes, 'GIF87a') || str_starts_with($bytes, 'GIF89a')) {
+        return 'skip';
+    }
+    if (str_starts_with($bytes, "\xFF\xD8\xFF")) {
+        return 'jpeg';
+    }
+    if (str_starts_with($bytes, "\x89PNG\r\n\x1a\n")) {
+        $offset = 8;
+        $length = strlen($bytes);
+        while ($offset + 12 <= $length) {
+            $size = unpack('N', substr($bytes, $offset, 4))[1];
+            if ($size > $length - $offset - 12) {
+                throw new RuntimeException('Malformed PNG');
+            }
+            $chunk = substr($bytes, $offset + 4, 4);
+            // Browsers may apply PNG EXIF orientation, which GD does not preserve.
+            if (in_array($chunk, ['acTL', 'fcTL', 'fdAT', 'eXIf'], true)) {
+                return 'skip';
+            }
+            $offset += 12 + $size;
+            if ($chunk === 'IEND') {
+                if ($offset !== $length) {
+                    throw new RuntimeException('Unexpected PNG trailing data');
+                }
+                return 'png';
+            }
+        }
+        throw new RuntimeException('Incomplete PNG');
+    }
+    if (strlen($bytes) >= 12 && substr($bytes, 0, 4) === 'RIFF' && substr($bytes, 8, 4) === 'WEBP') {
+        $length = strlen($bytes);
+        if (unpack('V', substr($bytes, 4, 4))[1] !== $length - 8) {
+            throw new RuntimeException('Malformed WebP');
+        }
+        for ($offset = 12; $offset < $length;) {
+            if ($offset + 8 > $length) {
+                throw new RuntimeException('Incomplete WebP chunk');
+            }
+            $chunk = substr($bytes, $offset, 4);
+            $size = unpack('V', substr($bytes, $offset + 4, 4))[1];
+            $padded = $size + ($size % 2);
+            if ($padded > $length - $offset - 8) {
+                throw new RuntimeException('Malformed WebP chunk');
+            }
+            // Skip EXIF-bearing WebP as well as any animated WebP.
+            if ($chunk === 'ANIM' || $chunk === 'ANMF' || $chunk === 'EXIF'
+                || ($chunk === 'VP8X' && $size >= 1 && (ord($bytes[$offset + 8]) & 2))) {
+                return 'skip';
+            }
+            $offset += 8 + $padded;
+        }
+        return 'webp';
+    }
+    throw new RuntimeException('Unsupported image format');
+}
+// LLM THUMBNAILS: END generated metadata-aware image classification.
+
+function thumbnailOrientation(string $bytes): ?int
+{
+    if (!function_exists('exif_read_data')) {
+        return null;
+    }
+    // A memory stream avoids leaving a readable original on disk.
+    $stream = fopen('php://memory', 'w+b');
+    if ($stream === false) {
+        throw new RuntimeException('Could not open EXIF stream');
+    }
+    try {
+        if (fwrite($stream, $bytes) !== strlen($bytes) || !rewind($stream)) {
+            throw new RuntimeException('Could not read EXIF data');
+        }
+        $exif = @exif_read_data($stream);
+        if ($exif === false) {
+            return null;
+        }
+        $orientation = (int) ($exif['Orientation'] ?? 1);
+        return $orientation >= 1 && $orientation <= 8 ? $orientation : null;
+    } finally {
+        fclose($stream);
+    }
+}
+
+// LLM THUMBNAILS: BEGIN generated concurrency-safe replacements.
+function thumbnailWebp(string $bytes, int $orientation = 1): string
+{
+    $image = @imagecreatefromstring($bytes);
+    if ($image === false) {
+        throw new RuntimeException('Could not decode image');
+    }
+    if (in_array($orientation, [2, 4, 5, 7], true) && !imageflip($image, IMG_FLIP_HORIZONTAL)) {
+        throw new RuntimeException('Could not flip image');
+    }
+    $angle = match ($orientation) {
+        3, 4 => 180,
+        6, 7 => -90,
+        5, 8 => 90,
+        default => 0,
+    };
+    if ($angle !== 0) {
+        $rotated = imagerotate($image, $angle, 0);
+        if ($rotated === false) {
+            throw new RuntimeException('Could not rotate image');
+        }
+        $image = $rotated;
+    }
+    $width = imagesx($image);
+    $height = imagesy($image);
+    $scale = min(1, 1024 / max($width, $height));
+    $target = imagecreatetruecolor(max(1, (int) round($width * $scale)), max(1, (int) round($height * $scale)));
+    if ($target === false) {
+        throw new RuntimeException('Could not allocate thumbnail');
+    }
+    imagealphablending($target, false);
+    imagesavealpha($target, true);
+    imagefill($target, 0, 0, imagecolorallocatealpha($target, 0, 0, 0, 127));
+    if (!imagecopyresampled($target, $image, 0, 0, 0, 0, imagesx($target), imagesy($target), $width, $height)) {
+        throw new RuntimeException('Could not resize image');
+    }
+    $stream = fopen('php://memory', 'w+b');
+    if ($stream === false) {
+        throw new RuntimeException('Could not open thumbnail stream');
+    }
+    try {
+        if (!imagewebp($target, $stream, 80) || !rewind($stream)) {
+            throw new RuntimeException('Could not encode thumbnail');
+        }
+        $result = stream_get_contents($stream);
+        if ($result === false || $result === '') {
+            throw new RuntimeException('Could not read thumbnail');
+        }
+        return $result;
+    } finally {
+        fclose($stream);
+    }
+}
+
+function processNextThumbnail(PDO $pdo): bool
+{
+    assertThumbnailCapabilities();
+    // The CLI's process lock serializes workers; expensive image work needs no SQLite write lock.
+    $job = $pdo->query(
+        'SELECT j.thing_id, j.room_id, t.filekey, t.room, t.thumbnail
+         FROM thumbnail_jobs j LEFT JOIN things t ON t.id = j.thing_id
+         ORDER BY j.thing_id LIMIT 1'
+    )->fetch(PDO::FETCH_ASSOC);
+    if ($job === false) {
+        return false;
+    }
+
+    $id = (int) $job['thing_id'];
+    $path = null;
+    $output = null;
+    $status = null;
+    $failure = null;
+    if ($job['filekey'] !== null && $job['thumbnail'] === 'pending') {
+        try {
+            $roomId = normalizeRoomId($job['room_id']);
+            if ($roomId !== $job['room_id'] || hashRoomId($roomId) !== $job['room']) {
+                throw new RuntimeException('Thumbnail job room mismatch');
+            }
+            $path = thumbnailStoragePath($job['filekey']);
+            $stored = @file_get_contents(imageStoragePath($job['filekey']));
+            if ($stored === false) {
+                throw new RuntimeException('Could not read original');
+            }
+            $bytes = restoreImageBytes($stored, $roomId);
+            $kind = thumbnailImageKind($bytes);
+            $orientation = $kind === 'jpeg' ? thumbnailOrientation($bytes) : 1;
+            if ($kind === 'skip' || $orientation === null) {
+                $status = 'skipped';
+            } else {
+                $output = scrambleImageBytes(thumbnailWebp($bytes, $orientation), $roomId);
+                $status = 'created';
+            }
+        } catch (Throwable $error) {
+            $status = 'failed';
+            $failure = $error;
+        }
+    }
+
+    // Recheck the exact job under the write lock before touching files or changing rows.
+    $pdo->exec('BEGIN IMMEDIATE');
+    try {
+        $find = $pdo->prepare(
+            'SELECT j.thing_id, j.room_id, t.filekey, t.room, t.thumbnail
+             FROM thumbnail_jobs j LEFT JOIN things t ON t.id = j.thing_id
+             WHERE j.thing_id = ?'
+        );
+        $find->execute([$id]);
+        $current = $find->fetch(PDO::FETCH_ASSOC);
+        if ($current !== $job) {
+            $pdo->exec('COMMIT');
+            return true;
+        }
+
+        if ($status !== null) {
+            try {
+                if ($path !== null) {
+                    removeStoredFile($path . '.tmp');
+                    if ($status === 'created') {
+                        $directory = dirname($path);
+                        if (!is_dir($directory) && !@mkdir($directory, 0755, true) && !is_dir($directory)) {
+                            throw new RuntimeException('Could not create thumbnail directory');
+                        }
+                        if (@file_put_contents($path . '.tmp', $output, LOCK_EX) !== strlen($output)
+                            || !@rename($path . '.tmp', $path)) {
+                            throw new RuntimeException('Could not publish thumbnail');
+                        }
+                    } else {
+                        removeStoredFile($path);
+                    }
+                }
+            } catch (Throwable $error) {
+                $status = 'failed';
+                $failure = $error;
+                if ($path !== null) {
+                    try {
+                        removeStoredFile($path . '.tmp');
+                        removeStoredFile($path);
+                    } catch (Throwable $cleanupError) {
+                        error_log('Thumbnail cleanup failure for thing ' . $id . ': ' . $cleanupError->getMessage());
+                    }
+                }
+            }
+            $pdo->prepare('UPDATE things SET thumbnail = ? WHERE id = ?')->execute([$status, $id]);
+        }
+        $pdo->prepare('DELETE FROM thumbnail_jobs WHERE thing_id = ?')->execute([$id]);
+        $pdo->exec('COMMIT');
+    } catch (Throwable $error) {
+        $pdo->exec('ROLLBACK');
+        throw $error;
+    }
+    if ($failure !== null) {
+        error_log('Thumbnail failure for thing ' . $id . ': ' . $failure->getMessage());
+        logChange('THUMBNAIL FAILED -- thing ' . $id . ': ' . $failure->getMessage());
+    }
+    return true;
+}
+// LLM THUMBNAILS: END generated concurrency-safe replacements.
+// LLM THUMBNAILS: END generated thumbnail processing and cleanup helpers.
+
 function changeRoomDoor(
     PDO $pdo,
     string $roomId,
@@ -668,6 +1018,7 @@ function resetAllHoles(PDO $pdo): int
     return $deleted;
 }
 
+/* LLM THUMBNAILS: BEGIN original resetAllThings section.
 // Delete referenced uploaded files and rows, retaining cleanup failures for retry.
 function resetAllThings(PDO $pdo): array
 {
@@ -709,3 +1060,47 @@ function resetAllThings(PDO $pdo): array
 
     return ['deleted' => $deleted, 'failed' => $failed];
 }
+LLM THUMBNAILS: END original resetAllThings section. */
+
+// LLM THUMBNAILS: BEGIN generated resetAllThings replacement.
+// Delete referenced uploaded files and rows, retaining cleanup failures for retry.
+function resetAllThings(PDO $pdo): array
+{
+    $deleted = 0;
+    $failed = [];
+    $pdo->exec('BEGIN IMMEDIATE');
+
+    try {
+        $images = $pdo->query('SELECT id, filekey FROM things')->fetchAll(PDO::FETCH_ASSOC);
+        $delete = $pdo->prepare('DELETE FROM things WHERE id = :id');
+        $deleteJob = $pdo->prepare('DELETE FROM thumbnail_jobs WHERE thing_id = :id');
+
+        foreach ($images as $image) {
+            try {
+                removeThingFiles($image['filekey']);
+            } catch (Throwable $error) {
+                $failed[] = $image['filekey'];
+                continue;
+            }
+
+            $deleteJob->execute(['id' => $image['id']]);
+            $delete->execute(['id' => $image['id']]);
+            $deleted += $delete->rowCount();
+        }
+        $pdo->exec('DELETE FROM thumbnail_jobs WHERE NOT EXISTS (SELECT 1 FROM things WHERE things.id = thumbnail_jobs.thing_id)');
+
+        $pdo->exec('COMMIT');
+    } catch (Throwable $error) {
+        // Rolling back rows cannot restore files already deleted from disk.
+        $pdo->exec('ROLLBACK');
+        throw $error;
+    }
+
+    logChange($failed === []
+        ? 'THINGS RESET'
+        : 'THINGS RESET PARTIAL -- ' . $deleted . ' removed; '
+            . count($failed) . ' retained for retry');
+
+    return ['deleted' => $deleted, 'failed' => $failed];
+}
+// LLM THUMBNAILS: END generated resetAllThings replacement.

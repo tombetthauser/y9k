@@ -111,7 +111,49 @@
         . ($doors['west']['exists'] ? 'd' : '-');
 
     $doorsCount = substr_count($key, 'd');
-    $gallery = $doorsCount < 2;
+
+    // Set false to immediately restore the original gallery/hallway rules.
+    $galleryExperiment = true;
+
+    // Gallery chances in percent, grouped by the room's number of doors.
+    // Original behavior: [0 => 100, 1 => 100, 2 => 0, 3 => 0, 4 => 0].
+    // Keep 0 and 1 at 100: hallway geometry expects at least two doors.
+    $galleryChanceByDoors = [
+        0 => 100,
+        1 => 100,
+        2 => 35,
+        3 => 20,
+        4 => 10,
+    ];
+
+    // Keep this unchanged while comparing percentages.
+    // Changing it selects a different group of experimental galleries.
+    $gallerySelectionSeed = 'gallery-experiment-v1';
+
+    // Use the same selection for the current room and neighboring door previews.
+    $isGallery = static function (string $id, int $doorCount) use (
+        $galleryExperiment,
+        $galleryChanceByDoors,
+        $gallerySelectionSeed
+    ): bool {
+        if (!$galleryExperiment) {
+            return $doorCount < 2;
+        }
+
+        $chance = $galleryChanceByDoors[$doorCount];
+
+        // Handle always/never explicitly so both endpoints are exact.
+        if ($chance <= 0) return false;
+        if ($chance >= 100) return true;
+
+        // Give each room a repeatable score from 0 up to, but excluding, 100.
+        $hash = hash('sha256', $gallerySelectionSeed . ':' . normalizeRoomId($id));
+        $score = hexdec(substr($hash, 0, 8)) / 4294967296 * 100;
+
+        return $score < $chance;
+    };
+
+    $gallery = $isGallery($roomId, $doorsCount);
 
     // Temporary room-to-computer assignments. Add another room ID and document URL here.
     // Placement and lighting are defined in helpers.js; database tracking can replace this map later.
@@ -262,17 +304,31 @@
                         throw new RuntimeException('Could not store image.');
                     }
 
-                    $statement = database()->prepare('INSERT INTO things (filename, filekey, room, wall, x, y, width) VALUES (:filename, :filekey, :room, :wall, :x, :y, :width)');
+                    $pdo = database();
+                    $pdo->beginTransaction();
+                    $statement = $pdo->prepare('INSERT INTO things (filename, filekey, room, wall, x, y, width) VALUES (:filename, :filekey, :room, :wall, :x, :y, :width)');
                     $args = ['filename' => scrambleMetadata($name, $roomId), 'filekey' => $key, 'room' => hashRoomId($roomId)];
                     $statement->execute($args + $meta);
+                    $id = (int) $pdo->lastInsertId();
+                    $job = $pdo->prepare('INSERT INTO thumbnail_jobs (thing_id, room_id) VALUES (:id, :room)');
+                    $job->execute(['id' => $id, 'room' => $roomId]);
+                    $pdo->commit();
                 } catch (Throwable $error) {
-                    if (is_file($path)) {
-                        unlink($path);
+                    if (isset($pdo) && $pdo->inTransaction()) {
+                        $pdo->rollBack();
+                    }
+                    if (is_file($path) && !unlink($path)) {
+                        error_log('Failed to clean up uploaded image after storage failure: ' . $key);
                     }
                     throw $error;
                 }
 
-                $res += ['id' => (int) database()->lastInsertId(), 'filename' => $name, 'url' => imageUrl($roomId, $key)];
+                $res += [
+                    'id' => $id,
+                    'filename' => $name,
+                    'url' => imageUrl($roomId, $key),
+                    'thumbnailUrl' => thumbnailUrl($roomId, $key),
+                ];
 
                 logChange('ROOM: ' . $roomId . ' | ADDED: ' . $name);
             } elseif ($action === 'move' || $action === 'delete') {
@@ -301,16 +357,11 @@
 
                     logChange('ROOM: ' . $roomId . ' | MOVED: ' . $name);
                 } else {
-                    $path = imageStoragePath($image['filekey']);
-
-                    if (is_file($path) && !unlink($path)) {
-                        throw new RuntimeException('Could not remove image file.');
+                    $deletedName = deleteStoredThing(database(), $id, $roomId);
+                    if ($deletedName === null) {
+                        throw new RuntimeException('Image not found in this room.');
                     }
-
-                    $statement = database()->prepare('DELETE FROM things WHERE id = :id AND room = :room');
-                    $statement->execute($where);
-
-                    logChange('ROOM: ' . $roomId . ' | DELETED: ' . $name);
+                    logChange('ROOM: ' . $roomId . ' | DELETED: ' . $deletedName);
                 }
             } else {
                 throw new RuntimeException('Unknown room action.');
@@ -348,15 +399,33 @@
         // The 3D view also needs a texture URL - stored file keys stay out of the page data
         $image = restoreImageMetadata($image, $roomId);
         $image['url'] = imageUrl($roomId, $image['filekey']);
+        $image['thumbnailUrl'] = thumbnailUrl($roomId, $image['filekey']);
         unset($image['filekey']);
         $images[] = $image;
     }
 
-    // 3D door appearance - determine whether each neighboring room is a gallery
+    // LLM THUMBNAIL BACKFILL: BEGIN queue old images after loading this room.
+    try {
+        queueRoomThumbnails(database(), $roomId);
+    } catch (PDOException $error) {
+        // The originals remain viewable if the job queue is temporarily unavailable.
+        error_log('Could not queue room thumbnails: ' . $error->getMessage());
+    }
+    // LLM THUMBNAIL BACKFILL: END queue old images after loading this room.
+
+    // Door previews must agree with the room that visitors will enter.
     foreach ($doors as &$door) {
-        $next = $door['exists'] ? getRoomDoors($door['neighborId'], database()) : [];
-        $door['destinationIsGallery'] = $door['exists']
-            && count(array_filter($next, static fn(array $neighborDoor): bool => $neighborDoor['exists'])) < 2;
+        $door['destinationIsGallery'] = false;
+
+        if (!$door['exists']) {
+            continue;
+        }
+
+        $next = getRoomDoors($door['neighborId'], database());
+        $door['destinationIsGallery'] = $isGallery(
+            $door['neighborId'],
+            roomDoorCount($next)
+        );
     }
 
     unset($door);

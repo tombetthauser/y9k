@@ -13,6 +13,7 @@ if ($id === false || $id === null || $id < 1) {
     exit;
 }
 
+/* LLM THUMBNAILS: BEGIN ORIGINAL IMAGE DELETION
 $statement = database()->prepare(
     'SELECT filename, filekey, wall FROM things WHERE id = :id AND room = :room'
 );
@@ -36,7 +37,6 @@ if ($image !== false) {
             exit('Failed to remove image file');
         }
     }
-
     $delete = database()->prepare(
         'DELETE FROM things WHERE id = :id AND room = :room'
     );
@@ -53,6 +53,24 @@ if ($image !== false) {
         );
     }
 }
+LLM THUMBNAILS: END ORIGINAL IMAGE DELETION */
+
+// LLM THUMBNAILS: BEGIN delete the image and thumbnail together.
+try {
+    $filename = deleteStoredThing(database(), $id, $roomId);
+} catch (RuntimeException $error) {
+    error_log('Image deletion failed: ' . $error->getMessage());
+    http_response_code(500);
+    exit('Failed to remove image files');
+}
+
+if ($filename !== null) {
+    logChange(
+        'ROOM: ' . strtolower($roomId)
+        . ' | DELETED: ' . $filename
+    );
+}
+// LLM THUMBNAILS: END delete the image and thumbnail together.
 
 header('Location: text.php?room=' . rawurlencode($roomId), true, 303);
 exit;

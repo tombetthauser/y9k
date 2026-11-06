@@ -59,6 +59,7 @@ if ($bytes === false) {
 
 $storedBytes = scrambleImageBytes($bytes, $roomId);
 
+/* LLM THUMBNAILS: BEGIN ORIGINAL UPLOAD STORAGE
 try {
     $written = file_put_contents($storedPath, $storedBytes, LOCK_EX);
 
@@ -88,6 +89,50 @@ try {
     }
     throw $error;
 }
+LLM THUMBNAILS: END ORIGINAL UPLOAD STORAGE */
+
+// LLM THUMBNAILS: BEGIN store the original and queue thumbnail generation.
+try {
+    $written = file_put_contents($storedPath, $storedBytes, LOCK_EX);
+
+    if ($written !== strlen($storedBytes)) {
+        throw new RuntimeException('Failed to scramble image');
+    }
+
+    $pdo = database();
+    $pdo->beginTransaction();
+    $statement = $pdo->prepare(
+        'INSERT INTO things
+            (filename, filekey, room, wall, x, y, width)
+        VALUES
+            (:filename, :filekey, :room, :wall, :x, :y, :width)'
+    );
+    $statement->execute([
+        'filename' => scrambleMetadata($filename, $roomId),
+        'filekey' => $storageKey,
+        'room' => hashRoomId($roomId),
+        'wall' => scrambleMetadata($_POST['wall'], $roomId),
+        'x' => scrambleMetadata($_POST['x'], $roomId),
+        'y' => scrambleMetadata($_POST['y'], $roomId),
+        'width' => scrambleMetadata($_POST['width'], $roomId),
+    ]);
+
+    // Saving the job in the same transaction prevents lost background work.
+    $job = $pdo->prepare(
+        'INSERT INTO thumbnail_jobs (thing_id, room_id) VALUES (:id, :room)'
+    );
+    $job->execute(['id' => (int) $pdo->lastInsertId(), 'room' => $roomId]);
+    $pdo->commit();
+} catch (Throwable $error) {
+    if (isset($pdo) && $pdo->inTransaction()) {
+        $pdo->rollBack();
+    }
+    if (is_file($storedPath) && !unlink($storedPath)) {
+        error_log('Failed to clean up uploaded image after storage failure: ' . $storageKey);
+    }
+    throw $error;
+}
+// LLM THUMBNAILS: END store the original and queue thumbnail generation.
 
 logChange(
     'ROOM: ' . strtolower($roomId)

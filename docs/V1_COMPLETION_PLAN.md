@@ -6,19 +6,26 @@ Planning reference — October 11, 2026. This records the agreed remaining scope
 
 Latest user decision: keep existing upload handling for trusted-user V1. Application byte limits, expanded validation, filename reservation, and deletion redirect cleanup are deferred to V2. PHP/server limits still apply. Earlier proposed size-limit patches are not part of the current V1 scope.
 
-Automatic resizing is deferred to the next pass. The reference image scan found `nightbird.jpg` at 2712 × 2490 pixels as the largest by pixel count, and `tallbear.jpg` at 1866 × 2731 as the longest edge. A later resizing target should accommodate these and contemporary iPhone photos; 48 million pixels was proposed, subject to the Pi's processing capacity. Do not decode/re-encode animated files in a way that silently discards animation.
+Automatic resizing of originals is deferred to the next pass. Separately, a
+background worker creates smaller wall-texture derivatives while preserving
+the uploaded originals. The reference image scan found `nightbird.jpg` at
+2712 × 2490 pixels as the largest by pixel count, and `tallbear.jpg` at
+1866 × 2731 as the longest edge. A later original-resizing target should
+accommodate these and contemporary iPhone photos; 48 million pixels was
+proposed, subject to the Pi's processing capacity. Do not decode/re-encode
+animated files in a way that silently discards animation.
 
 ## Implementation order before deployment
 
 ### 1. Room hashing, homemade metadata cipher, and image scrambling
 
-Follow [ROOM_STORAGE_PLAN.md](ROOM_STORAGE_PLAN.md) for canonical room hashing and the versioned, room-name XOR/Base64 metadata cipher. Reuse the helpers already used by `holes`. Update display, upload, and deletion together, preserving numeric values and SQL nulls after decoding. Use the selected fresh-database setup; no existing-record migration is required for this pass.
+Follow [ROOM_STORAGE_PLAN.md](ROOM_STORAGE_PLAN.md) for canonical room hashing and the room-name XOR/Base64 metadata cipher. Reuse the helpers already used by `holes`. Update display, upload, and deletion together, preserving numeric values and SQL nulls after decoding. The existing scrambled-image databases are now to be preserved using the one-time thumbnail schema migration and room-visit backfill described in [DEPLOYMENT_PLAN.md](DEPLOYMENT_PLAN.md).
 
 Follow [IMAGE_ENCRYPTION.md](IMAGE_ENCRYPTION.md) for private file storage and image delivery. The preference for this version is homemade room-based scrambling; the exact byte versus visual pixel approach is still undecided. Freeze and version its format and reversal rules before writing transformed files.
 
 Move transformed files outside `public/`, add a room-scoped serving endpoint, update all image/modal links, and keep upload cleanup and deletion consistent. Verify restoration without creating plaintext copies on disk. These features provide conceptual concealment, not private-room access control.
 
-Store files under opaque identifiers and keep their readable display names as separately scrambled metadata, as specified in IMAGE_ENCRYPTION.md. Use a separate opaque `storage_key` for file lookup and reset cleanup. The current implementation will start from a fresh database; metadata migration/versioning is not required for this pass.
+Store files under opaque identifiers and keep their readable display names as separately scrambled metadata, as specified in IMAGE_ENCRYPTION.md. The existing `filekey` provides the opaque reference for file lookup and reset cleanup. No metadata cipher migration/versioning is required for the thumbnail upgrade.
 
 ### 2. Door creation constraints
 

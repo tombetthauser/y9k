@@ -6,5 +6,7 @@ data/*.sqlite
 media/
 
 data/images/
+data/thumbnails/
+data/thumbnail-worker.lock
 
 data/log.txt
