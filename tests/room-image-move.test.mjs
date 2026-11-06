@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -9,6 +9,54 @@ import assert from 'node:assert/strict';
 
 // LLM ROOM IMAGE MOVE TESTS: BEGIN.
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+
+test('room image move controls are at the bottom of the artwork editor, not room information', () => {
+    const source = readFileSync(join(root, 'public/helpers.js'), 'utf8');
+    const roomInfo = source.slice(source.indexOf('async _openGalleryEntry('), source.indexOf('// Manual turns and door-centering'));
+    const editor = source.slice(source.indexOf('enableWallEditor() {'), source.indexOf('const discard = async () => {', source.indexOf('enableWallEditor() {')));
+    assert.doesNotMatch(roomInfo, /Move all images to another gallery|data-move-room-images/);
+    assert.match(editor, /<\/form>`;[\s\S]*this\._addAudioToggle\(panel\);[\s\S]*createElement\("details"\)[\s\S]*Move all images to another gallery[\s\S]*panel\.appendChild\(moveTool\)/);
+});
+
+test('artwork editor move control rejects hallways, respects cancellation, and moves after confirmation', async () => {
+    const source = readFileSync(join(root, 'public/helpers.js'), 'utf8');
+    const start = source.indexOf("        const moveButton = moveTool.querySelector('[data-move-room-images]');");
+    const end = source.indexOf('        // LLM ROOM IMAGE MOVE: END.', start);
+    assert.ok(start !== -1 && end !== -1);
+    const button = {}, target = { value: ' target ' }, status = {};
+    const elements = {
+        '[data-move-room-images]': button,
+        '[data-target-room]': target,
+        '[data-move-status]': status,
+    };
+    const tool = { querySelector: selector => elements[selector], addEventListener() {} };
+    let gallery = false, confirmed = false, moves = 0, reloads = 0;
+    const room = { options: { roomId: 'source', persistence: {
+        async checkGallery() { return { gallery, doorCount: gallery ? 1 : 2, targetRoom: 'target' }; },
+        async moveRoomImages() { moves++; return { moved: 2, targetRoom: 'target' }; },
+    } } };
+    const originalWindow = globalThis.window;
+    globalThis.window = { confirm: () => confirmed, location: { reload: () => reloads++ } };
+    try {
+        const setup = new Function('moveTool', 'run', 'busy', source.slice(start, end));
+        setup.call(room, tool, async action => action(), false);
+        await button.onclick();
+        assert.match(status.textContent, /not a gallery/i);
+        assert.equal(moves, 0);
+        gallery = true;
+        await button.onclick();
+        assert.equal(status.textContent, 'Move cancelled.');
+        assert.equal(moves, 0);
+        confirmed = true;
+        await button.onclick();
+        assert.equal(moves, 1);
+        assert.equal(reloads, 1);
+        assert.equal(button.disabled, false);
+        assert.equal(target.disabled, false);
+    } finally {
+        globalThis.window = originalWindow;
+    }
+});
 
 test('room storage sends target checks and confirmed moves through its existing endpoint', async () => {
     const originalFetch = globalThis.fetch;

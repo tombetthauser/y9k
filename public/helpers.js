@@ -1403,59 +1403,11 @@ export class Room {
             panel.innerHTML = `<div class="wall-editor-header">
                 <span data-entry></span><button type="button" name="close" aria-label="close gallery details">x</button>
                 </div><p data-info hidden style="white-space:pre-line"></p>
-                <details data-room-move hidden>
-                    <summary>Move all images to another gallery</summary>
-                    <label>Target room ID: <input type="text" data-target-room autocomplete="off" spellcheck="false"></label>
-                    <button type="button" data-move-room-images>Move images</button>
-                    <p data-move-status role="status" aria-live="polite"></p>
-                </details>
                 <p><a data-url></a></p>
                 <button type="button" data-copy>copy room link</button><p role="status" aria-live="polite"></p>`;
             this.stage.appendChild(panel);
             this._addAudioToggle(panel);
             panel.querySelector('[name="close"]').onclick = () => panel.close();
-            // LLM ROOM IMAGE MOVE: Confirm in the browser, then let PHP validate and move atomically.
-            const moveTool = panel.querySelector('[data-room-move]');
-            const moveButton = panel.querySelector('[data-move-room-images]');
-            const targetInput = panel.querySelector('[data-target-room]');
-            const moveStatus = panel.querySelector('[data-move-status]');
-            moveButton.onclick = async () => {
-                const targetRoomId = targetInput.value.trim();
-                if (!/^[0-9a-z]+$/i.test(targetRoomId)) {
-                    moveStatus.textContent = "Enter a room ID using letters and numbers.";
-                    return;
-                }
-                if (targetRoomId.toLowerCase() === String(this.options.roomId).toLowerCase()) {
-                    moveStatus.textContent = "Choose a different target room.";
-                    return;
-                }
-                moveButton.disabled = true;
-                moveStatus.textContent = "Checking the target room…";
-                try {
-                    const persistence = this.options.persistence;
-                    if (typeof persistence?.checkGallery !== "function"
-                        || typeof persistence?.moveRoomImages !== "function")
-                        throw new Error("Room image moving is unavailable.");
-                    const check = await persistence.checkGallery(targetRoomId);
-                    if (!check.gallery)
-                        throw new Error(`Room ${check.targetRoom.toUpperCase()} has ${check.doorCount} doors and is not a gallery. Images were not moved.`);
-                    if (!window.confirm(`WARNING: Move every image in room ${String(this.options.roomId).toUpperCase()} to room ${check.targetRoom.toUpperCase()}? Images from hallways will arrive unplaced.`)) {
-                        moveStatus.textContent = "Move cancelled.";
-                        return;
-                    }
-                    moveStatus.textContent = "Moving images…";
-                    const result = await persistence.moveRoomImages(check.targetRoom);
-                    moveStatus.textContent = `Moved ${result.moved} image(s) to gallery ${result.targetRoom.toUpperCase()}.`;
-                    window.location.reload();
-                } catch (error) {
-                    moveStatus.textContent = error.message;
-                } finally {
-                    moveButton.disabled = false;
-                }
-            };
-            for (const type of ["click", "pointerdown", "dblclick"])
-                moveTool.addEventListener(type, event => event.stopPropagation());
-            // LLM ROOM IMAGE MOVE: END.
             panel.querySelector("[data-copy]").onclick = async () => {
                 const link = panel.querySelector("[data-url]"), status = panel.querySelector("[role=status]");
                 const selectLink = () => {
@@ -1490,8 +1442,6 @@ export class Room {
         }
         const details = this.entryDialog.querySelector("[data-info]");
         details.hidden = !info;
-        const moveTool = this.entryDialog.querySelector("[data-room-move]");
-        moveTool.hidden = !info;
         // Build text nodes so labels can be styled without treating room data as HTML.
         details.replaceChildren();
         for (const [index, line] of (info ?? "").split("\n").entries()) {
@@ -2197,6 +2147,13 @@ export class Room {
         this.stage.appendChild(panel);
         this.wallEditor = panel;
         this._addAudioToggle(panel);
+        // Keep the room-wide tool outside the artwork form so it cannot change the preview.
+        const moveTool = document.createElement("details");
+        moveTool.innerHTML = `<summary>Move all images to another gallery</summary>
+            <label>Target room ID: <input type="text" data-target-room autocomplete="off" spellcheck="false"></label>
+            <button type="button" data-move-room-images>Move images</button>
+            <p data-move-status role="status" aria-live="polite"></p>`;
+        panel.appendChild(moveTool);
         panel.addEventListener("close", () => this.app.wallClick.hideCrosshair());
         const form = panel.querySelector("form"), fields = form.elements;
         const status = panel.querySelector("[role=status]");
@@ -2296,6 +2253,57 @@ export class Room {
                 idle.splice(0).forEach(resolve => resolve());
             }
         };
+        // LLM ROOM IMAGE MOVE: Lock artwork editing while checking and moving the room's images.
+        const moveButton = moveTool.querySelector('[data-move-room-images]');
+        const targetInput = moveTool.querySelector('[data-target-room]');
+        const moveStatus = moveTool.querySelector('[data-move-status]');
+        moveButton.onclick = async () => {
+            if (busy) {
+                moveStatus.textContent = "Wait for the current artwork operation to finish.";
+                return;
+            }
+            const targetRoomId = targetInput.value.trim();
+            if (!/^[0-9a-z]+$/i.test(targetRoomId)) {
+                moveStatus.textContent = "Enter a room ID using letters and numbers.";
+                return;
+            }
+            if (targetRoomId.toLowerCase() === String(this.options.roomId).toLowerCase()) {
+                moveStatus.textContent = "Choose a different target room.";
+                return;
+            }
+            moveButton.disabled = true;
+            targetInput.disabled = true;
+            try {
+                await run(async () => {
+                    moveStatus.textContent = "Checking the target room…";
+                    try {
+                        const persistence = this.options.persistence;
+                        if (typeof persistence?.checkGallery !== "function"
+                            || typeof persistence?.moveRoomImages !== "function")
+                            throw new Error("Room image moving is unavailable.");
+                        const check = await persistence.checkGallery(targetRoomId);
+                        if (!check.gallery)
+                            throw new Error(`Room ${check.targetRoom.toUpperCase()} has ${check.doorCount} doors and is not a gallery. Images were not moved.`);
+                        if (!window.confirm(`WARNING: Move every image in room ${String(this.options.roomId).toUpperCase()} to room ${check.targetRoom.toUpperCase()}? Images from hallways will arrive unplaced.`)) {
+                            moveStatus.textContent = "Move cancelled.";
+                            return;
+                        }
+                        moveStatus.textContent = "Moving images…";
+                        const result = await persistence.moveRoomImages(check.targetRoom);
+                        moveStatus.textContent = `Moved ${result.moved} image(s) to gallery ${result.targetRoom.toUpperCase()}.`;
+                        window.location.reload();
+                    } catch (error) {
+                        moveStatus.textContent = error.message;
+                    }
+                });
+            } finally {
+                moveButton.disabled = false;
+                targetInput.disabled = false;
+            }
+        };
+        for (const type of ["click", "pointerdown", "dblclick"])
+            moveTool.addEventListener(type, event => event.stopPropagation());
+        // LLM ROOM IMAGE MOVE: END.
         const discard = async () => {
             clearTimeout(noteTimer);
             if (id && this.images.has(id)) {
