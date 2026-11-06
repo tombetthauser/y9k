@@ -115,7 +115,7 @@
     // Temporary room-to-computer assignments. Add another room ID and document URL here.
     // Placement and lighting are defined in helpers.js; database tracking can replace this map later.
     $roomComputers = [
-        '0' => [
+        'tom' => [
             'documentUrl' => 'https://docs.google.com/document/d/e/2PACX-1vS-NhUvNixeN_CbjA1c63Ukkwsz79cPiG48FbtImX9ZHTSywKDDJErJOwXP-vY_BJdD674UGCR4zHfs/pub?embedded=true',
         ],
     ];
